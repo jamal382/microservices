@@ -1,0 +1,121 @@
+timestamp,container,cpu_pct,mem_usage,mem_pct
+1784995209,microservices-postgres-1,0.01%,115.2MiB / 15.5GiB,0.73%
+1784995209,microservices-inventory-1,0.17%,315.7MiB / 15.5GiB,1.99%
+1784995209,pg_connections,,,41
+1784995216,microservices-postgres-1,0.05%,115.2MiB / 15.5GiB,0.73%
+1784995216,microservices-inventory-1,0.17%,315.7MiB / 15.5GiB,1.99%
+1784995216,pg_connections,,,41
+1784995224,microservices-postgres-1,28.03%,118.7MiB / 15.5GiB,0.75%
+1784995224,microservices-inventory-1,353.48%,380.3MiB / 15.5GiB,2.40%
+1784995224,pg_connections,,,41
+1784995231,microservices-postgres-1,33.96%,118.4MiB / 15.5GiB,0.75%
+1784995231,microservices-inventory-1,145.85%,379.7MiB / 15.5GiB,2.39%
+1784995231,pg_connections,,,41
+1784995239,microservices-postgres-1,33.43%,118.5MiB / 15.5GiB,0.75%
+1784995239,microservices-inventory-1,79.83%,346.3MiB / 15.5GiB,2.18%
+1784995239,pg_connections,,,41
+1784995247,microservices-postgres-1,38.53%,118.4MiB / 15.5GiB,0.75%
+1784995247,microservices-inventory-1,61.89%,347.2MiB / 15.5GiB,2.19%
+1784995247,pg_connections,,,41
+1784995254,microservices-postgres-1,32.70%,118.5MiB / 15.5GiB,0.75%
+1784995254,microservices-inventory-1,65.25%,347.6MiB / 15.5GiB,2.19%
+1784995254,pg_connections,,,41
+1784995262,microservices-postgres-1,33.63%,118.4MiB / 15.5GiB,0.75%
+1784995262,microservices-inventory-1,63.56%,347.9MiB / 15.5GiB,2.19%
+1784995262,pg_connections,,,41
+1784995270,microservices-postgres-1,33.70%,118.5MiB / 15.5GiB,0.75%
+1784995270,microservices-inventory-1,59.94%,348.1MiB / 15.5GiB,2.19%
+1784995270,pg_connections,,,41
+1784995277,microservices-postgres-1,36.68%,119.2MiB / 15.5GiB,0.75%
+1784995277,microservices-inventory-1,75.22%,349.1MiB / 15.5GiB,2.20%
+1784995277,pg_connections,,,41
+1784995285,microservices-postgres-1,29.18%,118.4MiB / 15.5GiB,0.75%
+1784995285,microservices-inventory-1,59.49%,356.6MiB / 15.5GiB,2.25%
+1784995285,pg_connections,,,41
+1784995292,microservices-postgres-1,34.51%,118.4MiB / 15.5GiB,0.75%
+1784995292,microservices-inventory-1,57.87%,357.6MiB / 15.5GiB,2.25%
+1784995292,pg_connections,,,41
+1784995300,microservices-postgres-1,32.80%,118.4MiB / 15.5GiB,0.75%
+1784995300,microservices-inventory-1,53.84%,359.1MiB / 15.5GiB,2.26%
+1784995300,pg_connections,,,41
+1784995308,microservices-postgres-1,37.57%,118.4MiB / 15.5GiB,0.75%
+1784995308,microservices-inventory-1,59.18%,359.3MiB / 15.5GiB,2.26%
+1784995308,pg_connections,,,41
+1784995315,microservices-postgres-1,33.94%,118.4MiB / 15.5GiB,0.75%
+1784995315,microservices-inventory-1,60.84%,360.1MiB / 15.5GiB,2.27%
+1784995315,pg_connections,,,41
+1784995323,microservices-postgres-1,33.07%,118.4MiB / 15.5GiB,0.75%
+1784995323,microservices-inventory-1,60.14%,361.8MiB / 15.5GiB,2.28%
+1784995323,pg_connections,,,41
+1784995331,microservices-postgres-1,31.96%,118.4MiB / 15.5GiB,0.75%
+1784995331,microservices-inventory-1,52.92%,362.3MiB / 15.5GiB,2.28%
+1784995331,pg_connections,,,41
+1784995338,microservices-postgres-1,35.55%,118.4MiB / 15.5GiB,0.75%
+1784995338,microservices-inventory-1,58.58%,363.4MiB / 15.5GiB,2.29%
+1784995338,pg_connections,,,41
+1784995346,microservices-postgres-1,35.52%,118.4MiB / 15.5GiB,0.75%
+1784995346,microservices-inventory-1,53.25%,363.6MiB / 15.5GiB,2.29%
+1784995346,pg_connections,,,41
+1784995353,microservices-postgres-1,32.90%,118.4MiB / 15.5GiB,0.75%
+1784995353,microservices-inventory-1,55.21%,364.7MiB / 15.5GiB,2.30%
+1784995353,pg_connections,,,41
+1784995361,microservices-postgres-1,31.77%,119MiB / 15.5GiB,0.75%
+1784995361,microservices-inventory-1,59.19%,365.7MiB / 15.5GiB,2.30%
+1784995361,pg_connections,,,41
+1784995369,microservices-postgres-1,31.94%,118.4MiB / 15.5GiB,0.75%
+1784995369,microservices-inventory-1,52.84%,365.8MiB / 15.5GiB,2.30%
+1784995369,pg_connections,,,41
+1784995376,microservices-postgres-1,38.99%,118.7MiB / 15.5GiB,0.75%
+1784995376,microservices-inventory-1,52.93%,367.1MiB / 15.5GiB,2.31%
+1784995376,pg_connections,,,41
+1784995384,microservices-postgres-1,33.57%,118.4MiB / 15.5GiB,0.75%
+1784995384,microservices-inventory-1,55.68%,368.1MiB / 15.5GiB,2.32%
+1784995384,pg_connections,,,41
+1784995392,microservices-postgres-1,32.63%,118.4MiB / 15.5GiB,0.75%
+1784995392,microservices-inventory-1,56.61%,369.6MiB / 15.5GiB,2.33%
+1784995392,pg_connections,,,41
+1784995399,microservices-postgres-1,27.09%,118.5MiB / 15.5GiB,0.75%
+1784995399,microservices-inventory-1,60.49%,369.5MiB / 15.5GiB,2.33%
+1784995399,pg_connections,,,41
+1784995407,microservices-postgres-1,28.18%,118.4MiB / 15.5GiB,0.75%
+1784995407,microservices-inventory-1,52.47%,370.8MiB / 15.5GiB,2.34%
+1784995407,pg_connections,,,41
+1784995414,microservices-postgres-1,29.93%,118.4MiB / 15.5GiB,0.75%
+1784995414,microservices-inventory-1,55.69%,371.8MiB / 15.5GiB,2.34%
+1784995414,pg_connections,,,41
+1784995422,microservices-postgres-1,36.71%,118.5MiB / 15.5GiB,0.75%
+1784995422,microservices-inventory-1,53.67%,372.8MiB / 15.5GiB,2.35%
+1784995422,pg_connections,,,41
+1784995430,microservices-postgres-1,29.74%,118.7MiB / 15.5GiB,0.75%
+1784995430,microservices-inventory-1,51.27%,372.7MiB / 15.5GiB,2.35%
+1784995430,pg_connections,,,41
+1784995437,microservices-postgres-1,33.24%,119MiB / 15.5GiB,0.75%
+1784995437,microservices-inventory-1,62.63%,373.7MiB / 15.5GiB,2.35%
+1784995437,pg_connections,,,41
+1784995445,microservices-postgres-1,29.13%,118.5MiB / 15.5GiB,0.75%
+1784995445,microservices-inventory-1,53.77%,373.9MiB / 15.5GiB,2.35%
+1784995445,pg_connections,,,41
+1784995452,microservices-postgres-1,33.49%,118.5MiB / 15.5GiB,0.75%
+1784995452,microservices-inventory-1,58.75%,374.5MiB / 15.5GiB,2.36%
+1784995452,pg_connections,,,41
+1784995460,microservices-postgres-1,32.10%,118.4MiB / 15.5GiB,0.75%
+1784995460,microservices-inventory-1,51.11%,374.1MiB / 15.5GiB,2.36%
+1784995460,pg_connections,,,41
+1784995468,microservices-postgres-1,30.04%,118.4MiB / 15.5GiB,0.75%
+1784995468,microservices-inventory-1,51.19%,374.2MiB / 15.5GiB,2.36%
+1784995468,pg_connections,,,41
+1784995475,microservices-postgres-1,35.17%,118.8MiB / 15.5GiB,0.75%
+1784995475,microservices-inventory-1,57.95%,375MiB / 15.5GiB,2.36%
+1784995475,pg_connections,,,41
+1784995483,microservices-postgres-1,9.97%,118.4MiB / 15.5GiB,0.75%
+1784995483,microservices-inventory-1,63.32%,374.6MiB / 15.5GiB,2.36%
+1784995483,pg_connections,,,41
+1784995491,microservices-postgres-1,0.03%,118.4MiB / 15.5GiB,0.75%
+1784995491,microservices-inventory-1,2.20%,373.7MiB / 15.5GiB,2.35%
+1784995491,pg_connections,,,41
+1784995498,microservices-postgres-1,0.00%,118.4MiB / 15.5GiB,0.75%
+1784995498,microservices-inventory-1,0.11%,373.7MiB / 15.5GiB,2.35%
+1784995498,pg_connections,,,41
+1784995506,microservices-postgres-1,0.00%,118.4MiB / 15.5GiB,0.75%
+1784995506,microservices-inventory-1,2.96%,373.7MiB / 15.5GiB,2.35%
+1784995506,pg_connections,,,41

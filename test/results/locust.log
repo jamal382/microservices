@@ -1,0 +1,68 @@
+[2026-07-25 22:00:20,370] Jamal/INFO/locust.main: Starting Locust 2.46.1
+[2026-07-25 22:00:20,371] Jamal/INFO/locust.runners: Shape test starting.
+[2026-07-25 22:00:20,372] Jamal/INFO/locust.runners: Shape worker starting
+[2026-07-25 22:00:20,372] Jamal/INFO/locust.runners: Shape test updating to 50 users at 50.00 spawn rate
+[2026-07-25 22:00:20,372] Jamal/INFO/locust.runners: Ramping to 50 users at a rate of 50.00 per second
+[2026-07-25 22:00:20,377] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 50} (50 total users)
+[2026-07-25 22:00:30,420] Jamal/INFO/locust.runners: Shape test updating to 100 users at 50.00 spawn rate
+[2026-07-25 22:00:30,425] Jamal/INFO/locust.runners: Ramping to 100 users at a rate of 50.00 per second
+[2026-07-25 22:00:30,429] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 100} (100 total users)
+[2026-07-25 22:00:40,384] Jamal/WARNING/root: CPU usage above 90%! This may constrain your throughput and may even give inconsistent response time measurements! See https://docs.locust.io/en/stable/running-distributed.html for how to distribute the load over multiple CPU cores or machines
+[2026-07-25 22:00:40,527] Jamal/INFO/locust.runners: Shape test updating to 150 users at 50.00 spawn rate
+[2026-07-25 22:00:40,540] Jamal/INFO/locust.runners: Ramping to 150 users at a rate of 50.00 per second
+[2026-07-25 22:00:40,544] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 150} (150 total users)
+[2026-07-25 22:00:50,739] Jamal/INFO/locust.runners: Shape test updating to 200 users at 50.00 spawn rate
+[2026-07-25 22:00:50,755] Jamal/INFO/locust.runners: Ramping to 200 users at a rate of 50.00 per second
+[2026-07-25 22:00:50,760] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 200} (200 total users)
+[2026-07-25 22:01:01,000] Jamal/INFO/locust.runners: Shape test updating to 250 users at 50.00 spawn rate
+[2026-07-25 22:01:01,027] Jamal/INFO/locust.runners: Ramping to 250 users at a rate of 50.00 per second
+[2026-07-25 22:01:01,032] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 250} (250 total users)
+[2026-07-25 22:01:11,347] Jamal/INFO/locust.runners: Shape test updating to 300 users at 50.00 spawn rate
+[2026-07-25 22:01:11,380] Jamal/INFO/locust.runners: Ramping to 300 users at a rate of 50.00 per second
+[2026-07-25 22:01:11,390] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 300} (300 total users)
+[2026-07-25 22:01:20,814] Jamal/INFO/locust.runners: Shape test updating to 350 users at 50.00 spawn rate
+[2026-07-25 22:01:20,860] Jamal/INFO/locust.runners: Ramping to 350 users at a rate of 50.00 per second
+[2026-07-25 22:01:20,867] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 350} (350 total users)
+[2026-07-25 22:01:31,408] Jamal/INFO/locust.runners: Shape test updating to 400 users at 50.00 spawn rate
+[2026-07-25 22:01:31,460] Jamal/INFO/locust.runners: Ramping to 400 users at a rate of 50.00 per second
+[2026-07-25 22:01:31,466] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 400} (400 total users)
+[2026-07-25 22:01:41,022] Jamal/INFO/locust.runners: Shape test updating to 450 users at 50.00 spawn rate
+[2026-07-25 22:01:41,097] Jamal/INFO/locust.runners: Ramping to 450 users at a rate of 50.00 per second
+[2026-07-25 22:01:41,107] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 450} (450 total users)
+[2026-07-25 22:01:50,879] Jamal/INFO/locust.runners: Shape test updating to 500 users at 50.00 spawn rate
+[2026-07-25 22:01:51,014] Jamal/INFO/locust.runners: Ramping to 500 users at a rate of 50.00 per second
+[2026-07-25 22:01:51,026] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 500} (500 total users)
+[2026-07-25 22:02:00,745] Jamal/INFO/locust.runners: Shape test updating to 550 users at 50.00 spawn rate
+[2026-07-25 22:02:00,861] Jamal/INFO/locust.runners: Ramping to 550 users at a rate of 50.00 per second
+[2026-07-25 22:02:00,871] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 550} (550 total users)
+[2026-07-25 22:02:10,601] Jamal/INFO/locust.runners: Shape test updating to 600 users at 50.00 spawn rate
+[2026-07-25 22:02:10,707] Jamal/INFO/locust.runners: Ramping to 600 users at a rate of 50.00 per second
+[2026-07-25 22:02:10,715] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 600} (600 total users)
+[2026-07-25 22:02:20,770] Jamal/INFO/locust.runners: Shape test updating to 650 users at 50.00 spawn rate
+[2026-07-25 22:02:20,931] Jamal/INFO/locust.runners: Ramping to 650 users at a rate of 50.00 per second
+[2026-07-25 22:02:20,945] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 650} (650 total users)
+[2026-07-25 22:02:30,969] Jamal/INFO/locust.runners: Shape test updating to 700 users at 50.00 spawn rate
+[2026-07-25 22:02:31,126] Jamal/INFO/locust.runners: Ramping to 700 users at a rate of 50.00 per second
+[2026-07-25 22:02:31,135] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 700} (700 total users)
+[2026-07-25 22:02:41,484] Jamal/INFO/locust.runners: Shape test updating to 750 users at 50.00 spawn rate
+[2026-07-25 22:02:41,660] Jamal/INFO/locust.runners: Ramping to 750 users at a rate of 50.00 per second
+[2026-07-25 22:02:41,674] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 750} (750 total users)
+[2026-07-25 22:02:50,516] Jamal/INFO/locust.runners: Shape test updating to 800 users at 50.00 spawn rate
+[2026-07-25 22:02:50,779] Jamal/INFO/locust.runners: Ramping to 800 users at a rate of 50.00 per second
+[2026-07-25 22:02:50,792] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 800} (800 total users)
+[2026-07-25 22:03:01,024] Jamal/INFO/locust.runners: Shape test updating to 850 users at 50.00 spawn rate
+[2026-07-25 22:03:01,243] Jamal/INFO/locust.runners: Ramping to 850 users at a rate of 50.00 per second
+[2026-07-25 22:03:01,253] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 850} (850 total users)
+[2026-07-25 22:03:11,346] Jamal/INFO/locust.runners: Shape test updating to 900 users at 50.00 spawn rate
+[2026-07-25 22:03:11,502] Jamal/INFO/locust.runners: Ramping to 900 users at a rate of 50.00 per second
+[2026-07-25 22:03:11,515] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 900} (900 total users)
+[2026-07-25 22:03:20,629] Jamal/INFO/locust.runners: Shape test updating to 950 users at 50.00 spawn rate
+[2026-07-25 22:03:20,919] Jamal/INFO/locust.runners: Ramping to 950 users at a rate of 50.00 per second
+[2026-07-25 22:03:20,938] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 950} (950 total users)
+[2026-07-25 22:03:31,557] Jamal/INFO/locust.runners: Shape test updating to 1000 users at 50.00 spawn rate
+[2026-07-25 22:03:31,819] Jamal/INFO/locust.runners: Ramping to 1000 users at a rate of 50.00 per second
+[2026-07-25 22:03:31,833] Jamal/INFO/locust.runners: All users spawned: {"InventoryUser": 1000} (1000 total users)
+[2026-07-25 22:04:41,303] Jamal/INFO/locust.runners: Shape test stopping
+[2026-07-25 22:04:44,798] Jamal/WARNING/locust.runners: CPU usage was too high at some point during the test! See https://docs.locust.io/en/stable/running-distributed.html for how to distribute the load over multiple CPU cores or machines
+[2026-07-25 22:04:44,799] Jamal/INFO/locust.main: Shape test completed, shutting down
+[2026-07-25 22:04:44,864] Jamal/INFO/locust.main: Shutting down (exit code 0)

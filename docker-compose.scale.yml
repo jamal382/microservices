@@ -1,0 +1,16 @@
+# Overlay for running more than one inventory instance:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.scale.yml up -d --scale inventory=2
+#
+# The base file pins inventory to host port 8082, which collides as soon as a
+# second replica starts. `!override` replaces that ports list (plain merging
+# would append to it) with a range outside the 8081-8084 service allocation, so
+# each replica gets its own host port: 8092 for the first, 8093 for the second.
+# Inside the compose network both still listen on 8082 as `inventory`.
+#
+# The list is written inline on purpose -- kept on its own line under the tag,
+# an editor's YAML formatter has been observed to drop it, which leaves
+# `ports: !override` with no list and fails validation.
+services:
+  inventory:
+    ports: !override ["8092-8093:8082"]

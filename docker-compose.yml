@@ -1,0 +1,161 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: microservices
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d microservices"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  pgadmin:
+    image: dpage/pgadmin4:9.13
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+
+  catalog:
+    build: ./catalog
+    develop:
+      watch:
+        - action: rebuild
+          path: ./catalog/src
+        - action: rebuild
+          path: ./catalog/pom.xml
+    environment:
+      SERVER_PORT: 8081
+      DB_HOST: postgres
+      DB_USER: catalog_user
+      DB_PASSWORD: catalog_pass
+      INVENTORY_URL: http://inventory:8082
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    networks:
+      - backend
+
+  inventory:
+    build: ./inventory
+    develop:
+      watch:
+        - action: rebuild
+          path: ./inventory/src
+        - action: rebuild
+          path: ./inventory/pom.xml
+    environment:
+      SERVER_PORT: 8082
+      DB_HOST: postgres
+      DB_USER: inventory_user
+      DB_PASSWORD: inventory_pass
+    ports:
+      - "8082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    networks:
+      - backend
+
+  sales:
+    build: ./sales
+    develop:
+      watch:
+        - action: rebuild
+          path: ./sales/src
+        - action: rebuild
+          path: ./sales/pom.xml
+    environment:
+      SERVER_PORT: 8083
+      DB_HOST: postgres
+      DB_USER: sales_user
+      DB_PASSWORD: sales_pass
+      CATALOG_URL: http://catalog:8081
+      INVENTORY_URL: http://inventory:8082
+      PAYMENT_URL: http://payment:8084
+    ports:
+      - "8083:8083"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      catalog:
+        condition: service_healthy
+      inventory:
+        condition: service_healthy
+      payment:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8083/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    networks:
+      - backend
+
+  payment:
+    build: ./payment
+    develop:
+      watch:
+        - action: rebuild
+          path: ./payment/src
+        - action: rebuild
+          path: ./payment/pom.xml
+    environment:
+      SERVER_PORT: 8084
+      DB_HOST: postgres
+      DB_USER: payment_user
+      DB_PASSWORD: payment_pass
+    ports:
+      - "8084:8084"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8084/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    networks:
+      - backend
+
+volumes:
+  postgres_data:
+  pgadmin_data:
+
+networks:
+  backend:
+    driver: bridge
