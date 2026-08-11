@@ -12,11 +12,12 @@ codebase, which is what turns a memorized definition into a credible answer.
 6. [Database and migrations](#6-database-and-migrations)
 7. [Microservices architecture](#7-microservices-architecture)
 8. [Inter-service communication and resilience](#8-inter-service-communication-and-resilience)
-9. [Docker](#9-docker)
-10. [Docker Compose and load balancing](#10-docker-compose-and-load-balancing)
-11. [Performance and concurrency](#11-performance-and-concurrency)
-12. [Testing](#12-testing)
-13. [Questions about the project itself](#13-questions-about-the-project-itself)
+9. [Service discovery with Eureka](#9-service-discovery-with-eureka)
+10. [Docker](#10-docker)
+11. [Docker Compose and load balancing](#11-docker-compose-and-load-balancing)
+12. [Performance and concurrency](#12-performance-and-concurrency)
+13. [Testing](#13-testing)
+14. [Questions about the project itself](#14-questions-about-the-project-itself)
 
 ---
 
@@ -561,9 +562,10 @@ A registry (Eureka, Consul) where instances register on startup and callers look
 logical name. It solves the problem that a hardcoded URL holds exactly one address: you
 can't scale behind it, and it can't tell you the target is down.
 
-*In this project:* sales resolves `${CATALOG_URL:http://localhost:8081}` from an environment
-variable — deliberate technical debt, with Eureka plus a `@LoadBalanced` client resolving
-`http://catalog` as the planned replacement.
+*In this project:* both approaches run side by side on purpose. Catalog resolves
+`http://inventory` through Eureka with a `@LoadBalanced` client; sales still reads
+`${CATALOG_URL:http://localhost:8081}` from an environment variable, kept as the contrast
+case. Section 9 covers the registry in detail.
 
 **Q: What does an API gateway do?**
 
@@ -623,7 +625,199 @@ and the remedies are most of what "microservices experience" means.
 
 ---
 
-## 9. Docker
+## 9. Service discovery with Eureka
+
+**Q: What is Eureka, and — more importantly — what is it not?**
+
+A registry: a service that holds a list of application names and the live instances behind
+each one. Instances register on startup and heartbeat to stay listed; callers fetch the list
+and resolve a name to an address themselves.
+
+What it is *not* is a proxy. Eureka never sits in the request path, never forwards traffic,
+and never sees your payloads. It answers a question ahead of time; the caller caches the
+answer and then connects straight to the target. That single distinction explains most of
+Eureka's behaviour, including why it can be down while traffic keeps flowing.
+
+**Q: Walk me through the registration lifecycle.**
+
+Four phases. **Register** — on startup the instance POSTs its application name, IP, port,
+and instance ID. **Renew** — it heartbeats on an interval to keep the lease alive.
+**Fetch** — callers pull the registry on their own interval and cache it locally.
+**Evict** — if heartbeats stop for longer than the lease duration, the registry drops the
+instance, and callers learn about it at their next fetch.
+
+*In this project:* inventory registers and heartbeats every 10s with a 30s lease; catalog
+fetches every 10s and never registers.
+
+**Q: If callers cache the registry, isn't the data always slightly stale?**
+
+Yes, and that's the design rather than a defect. Every address the load balancer uses comes
+from a local snapshot, not a live call, so there's a window — bounded by heartbeat interval
+plus lease duration plus fetch interval — in which a caller will confidently dial an
+instance that is already gone. You can shrink the window with tuning; you cannot close it.
+
+The consequence worth stating out loud: **discovery guarantees you will sometimes be handed
+a dead address**, which is exactly why timeouts, retries, and circuit breakers are not
+optional once you adopt it. Discovery and resilience are a package.
+
+**Q: `register-with-eureka` and `fetch-registry` are separate flags. Why?**
+
+Because publishing your address and looking other people up are independent roles. A service
+that is reached at a fixed address but calls scaled peers only needs to fetch; a service
+that is scaled but calls nobody only needs to register. Setting both to `true` everywhere
+out of habit hides the fact that they answer different questions.
+
+*In this project:* the pair is deliberately split to make that visible — inventory is
+`register=true, fetch=false` (it is the scaled one, and makes no outbound calls); catalog is
+`register=false, fetch=true` (it is reached at a fixed port, and calls inventory).
+
+**Q: Why does the Eureka server itself set both flags to `false`?**
+
+A standalone registry has nobody to register with and nothing to fetch — itself is the
+source of truth. Leaving the defaults on makes a single-node server try to replicate with a
+peer that doesn't exist, which produces connection-refused noise in the log on a loop. In a
+real HA deployment you'd flip both back on and point the nodes at each other, which is how
+Eureka peers replicate.
+
+**Q: What does `@LoadBalanced` actually do to a `RestClient.Builder`?**
+
+It registers an interceptor. When a request goes out to a URL whose host is a single segment
+with no dots — `http://inventory` — the interceptor treats that segment as a **service ID**,
+not a hostname, asks Spring Cloud LoadBalancer for a live instance of that application, and
+rewrites the URL to a real `ip:port` before the request leaves the JVM.
+
+Worth being explicit in an interview: there is no DNS record for `inventory` in that flow.
+`ping inventory` from the caller would be a different mechanism entirely.
+
+*In this project:* `RestClientConfig` builds `inventoryRestClient` from the load-balanced
+builder with `baseUrl("http://inventory")`, and `InventoryClient` just calls
+`/api/stock/{id}` against it.
+
+**Q: This is client-side load balancing. How does it differ from a load balancer?**
+
+A server-side balancer (HAProxy, Nginx, a Kubernetes `Service`) is a box in the middle: one
+address, one extra network hop, and it owns the choice of instance. Client-side balancing
+puts the instance list *in the caller* and lets the caller choose — no extra hop, no shared
+component to scale or fail, and the client can be smart about retries, zone affinity, or
+preferring an instance it already has a warm connection to.
+
+The cost is that the logic now lives in every client, so it's library-specific and
+language-specific. That's a real reason teams move to a service mesh or plain Kubernetes
+Services once more than one runtime is involved.
+
+**Q: You scaled to two replicas and the dashboard showed one. What happened?**
+
+They registered under the same instance ID and overwrote each other. Eureka keys instances
+by ID within an application, and the default ID is derived from the hostname — which under
+Docker is *sometimes* unique and sometimes not, which is worse than reliably broken because
+you get intermittently wrong instance counts.
+
+*In this project:* `eureka.instance.instance-id=${spring.application.name}:${random.uuid}`.
+The symptom to memorize: you scaled to N, the registry shows fewer, and all traffic lands on
+one container.
+
+**Q: Why `eureka.instance.prefer-ip-address=true` under Docker?**
+
+By default an instance registers under its hostname, and a container's hostname is its short
+container ID — resolvable inside that container and nowhere else. The caller receives an
+address it cannot connect to, and you get a connection failure that looks like the target is
+down when it's actually fine. Registering by IP gives an address that's valid on the shared
+network.
+
+**Q: What is self-preservation mode, and why is it off here?**
+
+If Eureka loses more than a threshold share of expected heartbeats in a window, it assumes
+the *network* broke rather than that every instance died, and stops evicting anything —
+protecting you from mass-deregistering a healthy fleet during a partition. The trade is
+that a genuinely dead instance stays in the registry indefinitely.
+
+*In this project:* it's disabled, plus a 5s eviction timer, purely because this is a
+learning environment — with it on, a service you deliberately stopped lingers in the
+dashboard and the exercise stops demonstrating anything. In production you leave it on.
+
+**Q: How do you tune heartbeat and lease, and what's the trade-off?**
+
+`lease-renewal-interval-in-seconds` is how often the instance heartbeats (default 30);
+`lease-expiration-duration-in-seconds` is how long the registry waits before evicting
+(default 90). Shorter means dead instances disappear faster; it also means more registry
+traffic and a higher chance of evicting a healthy instance that had one slow moment. The
+expiration should stay a comfortable multiple of the renewal interval.
+
+*In this project:* 10s and 30s — eviction in about 30s instead of 90.
+
+**Q: What happens if the Eureka server dies?**
+
+Much less than people expect. Callers keep their last-fetched snapshot and keep routing from
+it, so existing traffic continues; what stops is *learning about change* — new instances go
+unnoticed, dead ones stay in the list. A registry outage degrades freshness, not
+availability. It becomes a real outage only when a caller cold-starts with an empty cache
+and has nothing to fall back to.
+
+**Q: You hit "No servers available for service: eureka" at startup. What causes that?**
+
+A circular lookup. The Eureka client's own HTTP transport injects whatever
+`RestClient.Builder` it can find *by type*; if the only one is `@LoadBalanced`, it tries to
+resolve the registry's own address **through the registry** — before the registry client
+exists.
+
+*In this project:* the builder is declared `@Bean(defaultCandidate = false)`, which removes
+it from by-type resolution. Eureka's transport gets the plain auto-configured builder, while
+injection points that ask by the `@LoadBalanced` qualifier still get the right one. It's a
+good example of a bug that reads as a networking problem and is actually a wiring problem.
+
+**Q: Why `builder.clone()` before setting `baseUrl`?**
+
+Because `baseUrl` mutates the builder in place, and the builder is a shared singleton bean.
+Setting it directly would pin every future consumer of that builder to the same base URL —
+fine with one client, a confusing action-at-a-distance bug the moment a second one is added.
+
+**Q: An instance is in the registry and its container is healthy, but it gets no traffic.
+Where do you look?**
+
+At its `status` in the registry, before you look at the container at all. Eureka carries a
+per-instance status (`UP`, `DOWN`, `OUT_OF_SERVICE`) that is separate from whether the
+process is running, and it can be changed at runtime through the actuator or the Eureka API.
+Only `UP` instances are eligible for load balancing. Health and eligibility are independent —
+which is also what makes graceful draining possible: mark an instance `OUT_OF_SERVICE`, let
+traffic bleed off, then stop it.
+
+**Q: Your project has both Eureka and Docker DNS round-robin. Why keep both?**
+
+As a deliberate contrast. Both inventory replicas share an `inventory` network alias, so
+Docker's embedded DNS rotates A records for anyone resolving that name — free, but not
+health-aware, and the JVM's DNS caching lets a Java client pin itself to one replica and
+never move. Eureka gives the caller the actual instance list, an explicit strategy, and
+status awareness.
+
+*In this project:* catalog reaches inventory through the registry, sales reaches the same
+two replicas through the Docker alias. Same targets, two mechanisms, and the `X-Instance-Id`
+header on every inventory response shows which replica each path actually hit.
+
+**Q: Would you choose Eureka for a new system today?**
+
+Probably not, and the reason matters more than the answer. On Kubernetes the platform
+already provides discovery — a `Service` gives you a stable DNS name, readiness-gated
+endpoints, and load balancing without any client library — so running Eureka duplicates it
+in your application layer. Eureka still earns its place outside Kubernetes, on VMs or plain
+Docker, and in a Spring-only estate where client-side balancing and the ecosystem
+integration are worth having. Consul is the middle ground: discovery plus KV and health
+checking, language-neutral.
+
+The transferable part is the model, not the product: register, heartbeat, cache, evict —
+Consul, Kubernetes endpoints, and a service mesh's control plane are all the same four
+phases with different names.
+
+**Q: What does service discovery not solve?**
+
+Everything after you have the address. It tells you where an instance *was* a few seconds
+ago; it doesn't tell you the instance is healthy right now, doesn't retry, doesn't time out,
+and doesn't stop you from hammering a failing replica. It also doesn't help with what to do
+when *no* instance is available. Adopting discovery without timeouts and circuit breakers
+mostly buys you a more dynamic way to fail.
+
+---
+
+## 10. Docker
 
 **Q: Container vs virtual machine?**
 
@@ -698,7 +892,7 @@ before bringing it back up.
 
 ---
 
-## 10. Docker Compose and load balancing
+## 11. Docker Compose and load balancing
 
 **Q: How do you load balance across service instances using Docker Compose?**
 
@@ -738,8 +932,10 @@ holds the instance list and picks one itself with Spring Cloud LoadBalancer, cal
 `http://inventory` as a logical service ID. No extra network hop, and the client can be
 smart about retries and zone affinity.
 
-*In this project:* option 1 is what's running today (`--scale inventory=2`), with HAProxy and
-Eureka specified in `docs/PRD.md` as the Phase 2 replacements.
+*In this project:* options 1 and 3 both run today. Two inventory replicas share an
+`inventory` network alias, so sales reaches them by DNS round-robin, while catalog resolves
+the same replicas through Eureka (section 9). HAProxy is specified in `docs/PRD.md` as the
+next phase.
 
 **Q: Why would you use both an edge load balancer and client-side load balancing?**
 
@@ -767,7 +963,14 @@ and horizontal scaling are mutually exclusive. Three fixes:
 - Publish only the container port (`- "8082"`) and let Docker assign random host ports.
 - Map a host **range**, so each replica takes the next port.
 
-*In this project:* an overlay file, `docker-compose.scale.yml`:
+*In this project:* the replicas are now two named services, `inventory1` and `inventory2`,
+each publishing its own host port (`9092:8082`, `9093:8082`) and sharing an `inventory`
+network alias so callers still address one name. Named replicas rather than `--scale`
+because each needs a stable, individually reachable port for inspecting *which* instance
+served a call.
+
+That replaced an earlier `docker-compose.scale.yml` overlay, which is where the next
+question comes from:
 
 ```yaml
 services:
@@ -775,7 +978,7 @@ services:
     ports: !override ["8092-8093:8082"]
 ```
 
-**Q: Why is `!override` needed there?**
+**Q: Why was `!override` needed there?**
 
 Because Compose **merges** lists across files by default — without the tag, the range is
 appended to the existing `8082:8082` mapping and the collision remains. `!override` replaces
@@ -850,7 +1053,7 @@ docker compose exec -T postgres psql -U postgres -d microservices < infra/postgr
 
 ---
 
-## 11. Performance and concurrency
+## 12. Performance and concurrency
 
 **Q: How would you load test a service, and what do you measure?**
 
@@ -917,7 +1120,7 @@ one of those protections — the gap between them is where the oversell lives.
 
 ---
 
-## 12. Testing
+## 13. Testing
 
 **Q: Unit vs integration test — where do you draw the line?**
 
@@ -955,7 +1158,7 @@ that proves the optimistic lock actually prevents an oversell.
 
 ---
 
-## 13. Questions about the project itself
+## 14. Questions about the project itself
 
 **Q: Tell me about this project.**
 
