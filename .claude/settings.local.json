@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(awk '/INSERT INTO catalog.products/,/ON CONFLICT/' infra/postgres/seed.sql)",
-      "Bash(awk '/INSERT INTO inventory.stock_items/,/ON CONFLICT/' infra/postgres/seed.sql)"
+      "Bash(awk '/INSERT INTO inventory.stock_items/,/ON CONFLICT/' infra/postgres/seed.sql)",
+      "Bash(grep -n '^#\\\\{1,3\\\\} ' docs/PRD.md)"
     ]
   }
 }
