@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:17-alpine
+    container_name: postgres
     environment:
       POSTGRES_DB: microservices
       POSTGRES_USER: postgres
@@ -20,6 +21,7 @@ services:
 
   pgadmin:
     image: dpage/pgadmin4:9.13
+    container_name: pgadmin
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
@@ -34,8 +36,26 @@ services:
     networks:
       - backend
 
+  # Service registry. Every business service registers here on startup and
+  # heartbeats to stay listed; callers resolve service ids against it instead of
+  # against a hardcoded host:port. Dashboard: http://localhost:8761
+  eureka:
+    build: ./eureka-server
+    container_name: eureka
+    ports:
+      - "8761:8761"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8761/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    networks:
+      - backend
+
   catalog:
     build: ./catalog
+    container_name: catalog
     develop:
       watch:
         - action: rebuild
@@ -47,10 +67,12 @@ services:
       DB_HOST: postgres
       DB_USER: catalog_user
       DB_PASSWORD: catalog_pass
-      INVENTORY_URL: http://inventory:8082
+      EUREKA_URL: http://eureka:8761/eureka/
     ports:
       - "8081:8081"
     depends_on:
+      eureka:
+        condition: service_started
       postgres:
         condition: service_healthy
     healthcheck:
@@ -62,8 +84,9 @@ services:
     networks:
       - backend
 
-  inventory:
+  inventory1:
     build: ./inventory
+    container_name: inventory1
     develop:
       watch:
         - action: rebuild
@@ -75,9 +98,12 @@ services:
       DB_HOST: postgres
       DB_USER: inventory_user
       DB_PASSWORD: inventory_pass
+      EUREKA_URL: http://eureka:8761/eureka/
     ports:
-      - "8082:8082"
+      - "9092:8082"
     depends_on:
+      eureka:
+        condition: service_started
       postgres:
         condition: service_healthy
     healthcheck:
@@ -87,10 +113,44 @@ services:
       retries: 5
       start_period: 40s
     networks:
-      - backend
-
+      backend:
+        aliases:
+          - inventory
+  inventory2:
+    build: ./inventory
+    container_name: inventory2
+    develop:
+      watch:
+        - action: rebuild
+          path: ./inventory/src
+        - action: rebuild
+          path: ./inventory/pom.xml
+    environment:
+      SERVER_PORT: 8082
+      DB_HOST: postgres
+      DB_USER: inventory_user
+      DB_PASSWORD: inventory_pass
+      EUREKA_URL: http://eureka:8761/eureka/
+    ports:
+      - "9093:8082"
+    depends_on:
+      eureka:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    networks:
+      backend:
+        aliases:
+          - inventory
   sales:
     build: ./sales
+    container_name: sales
     develop:
       watch:
         - action: rebuild
@@ -112,7 +172,9 @@ services:
         condition: service_healthy
       catalog:
         condition: service_healthy
-      inventory:
+      inventory1:
+        condition: service_healthy
+      inventory2:
         condition: service_healthy
       payment:
         condition: service_healthy
@@ -127,6 +189,7 @@ services:
 
   payment:
     build: ./payment
+    container_name: payment
     develop:
       watch:
         - action: rebuild

@@ -1,6 +1,6 @@
 package com.finalearth.sales.client;
 
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
@@ -14,8 +14,8 @@ public class CatalogClient {
 
     private final RestClient restClient;
 
-    public CatalogClient(@Value("${catalog.service.url:http://localhost:8081}") String catalogUrl) {
-        this.restClient = RestClient.builder().baseUrl(catalogUrl).build();
+    public CatalogClient(@Qualifier("catalogRestClient") RestClient restClient) {
+        this.restClient = restClient;
     }
 
     public record ProductResponse(

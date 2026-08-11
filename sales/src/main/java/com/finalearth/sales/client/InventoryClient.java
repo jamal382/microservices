@@ -1,6 +1,6 @@
 package com.finalearth.sales.client;
 
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
@@ -14,8 +14,8 @@ public class InventoryClient {
 
     private final RestClient restClient;
 
-    public InventoryClient(@Value("${inventory.service.url:http://localhost:8082}") String inventoryUrl) {
-        this.restClient = RestClient.builder().baseUrl(inventoryUrl).build();
+    public InventoryClient(@Qualifier("inventoryRestClient") RestClient restClient) {
+        this.restClient = restClient;
     }
 
     public record ReserveItem(Long productId, Integer quantity) {}

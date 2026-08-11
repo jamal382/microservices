@@ -1,6 +1,6 @@
 package com.finalearth.sales.client;
 
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
@@ -14,8 +14,8 @@ public class PaymentClient {
 
     private final RestClient restClient;
 
-    public PaymentClient(@Value("${payment.service.url:http://localhost:8084}") String paymentUrl) {
-        this.restClient = RestClient.builder().baseUrl(paymentUrl).build();
+    public PaymentClient(@Qualifier("paymentRestClient") RestClient restClient) {
+        this.restClient = restClient;
     }
 
     public record PaymentRequest(Long orderId, BigDecimal amount, String method) {}

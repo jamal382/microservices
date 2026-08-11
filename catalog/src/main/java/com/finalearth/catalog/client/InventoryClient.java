@@ -2,7 +2,7 @@ package com.finalearth.catalog.client;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
@@ -17,12 +17,12 @@ public class InventoryClient {
 
     private static final Logger log = LoggerFactory.getLogger(InventoryClient.class);
 
-    private final RestClient restClient;
-    private final String inventoryUrl;
+    private static final String SERVICE_ID = "inventory";
 
-    public InventoryClient(@Value("${inventory.service.url:http://localhost:8082}") String inventoryUrl) {
-        this.inventoryUrl = inventoryUrl;
-        this.restClient = RestClient.builder().baseUrl(inventoryUrl).build();
+    private final RestClient restClient;
+
+    public InventoryClient(@Qualifier("inventoryRestClient") RestClient restClient) {
+        this.restClient = restClient;
     }
 
     public record StockResponse(
@@ -42,11 +42,12 @@ public class InventoryClient {
                     .toEntity(StockResponse.class);
             long millis = (System.nanoTime() - startNanos) / 1_000_000;
 
-            // X-Instance-Id is stamped by inventory's logging filter. With no
-            // load balancer in Phase 1 this is the only way the caller can see
-            // which replica handled the call.
-            log.info("[catalog->inventory] GET {}/api/stock/{} -> {} ({} ms) served-by={} response={}",
-                    inventoryUrl, productId, response.getStatusCode().value(), millis,
+            // X-Instance-Id is stamped by inventory's logging filter. The URL logged
+            // here is the service id we asked for, not the address we reached --
+            // Spring Cloud LoadBalancer resolved that per call -- so this header is
+            // how the caller sees which replica round-robin actually picked.
+            log.info("[catalog->inventory] GET http://{}/api/stock/{} -> {} ({} ms) served-by={} response={}",
+                    SERVICE_ID, productId, response.getStatusCode().value(), millis,
                     response.getHeaders().getFirst("X-Instance-Id"), response.getBody());
 
             return response.getBody();
