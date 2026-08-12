@@ -1,5 +1,24 @@
 # Lab 02 — Service Discovery with Eureka
 
+> **⚠️ ARCHIVED — this lab no longer matches the running stack.**
+>
+> The system has since dropped Eureka entirely. There is no `eureka-server/`
+> module, no registry on `:8761`, and no Spring Cloud dependency in any `pom.xml`.
+> Both jobs the registry did are now done by other layers:
+>
+> | Eureka did | Now done by |
+> |---|---|
+> | Give external callers one address for the system | HAProxy on `:80`, path-routed — Lab 03 |
+> | Let `catalog` find the two `inventory` replicas | Docker's embedded DNS via the shared `inventory` network alias |
+> | Health/eligibility signal per instance | HAProxy's `option httpchk` against `/actuator/health` |
+>
+> **None of the commands below will run against the current stack.** Kept as
+> reference reading: the registry model, the AP/staleness trade-off in §1, and the
+> "heartbeats are the instance asserting it is alive, not the registry verifying"
+> point are all still worth understanding — they describe how registry-based
+> discovery behaves in general, and the failure modes it hands downstream. Read it
+> for the model, not for the instructions. **Lab 03 is the current state.**
+
 **Prerequisites:** Lab 01 (first run) complete. `docker compose up -d --build` brings the stack up healthy.
 
 **What you will end up with:** a registry on `:8761`, all four services registered, and every hardcoded service URL deleted from the codebase.
@@ -366,7 +385,7 @@ If you cannot answer these from memory, re-read section 1.
 5. `http://inventory` has no DNS record. Explain what turns it into a real address, and at what moment.
 6. Why does the registry itself set `register-with-eureka=false`?
 7. An instance is `UP` in the registry but every request to it returns 500. Does Eureka notice? What would have to be added for the system to cope?
-8. Two load balancers are coming in this project (HAProxy in Lab 03, this one). Which handles traffic *entering* the system, and which handles service-to-service traffic? Why is it wrong to route internal calls through the edge gateway?
+8. Two load balancers exist in this project (HAProxy — Lab 03 — and this one). Which handles traffic *entering* the system, and which handles service-to-service traffic? Why is it wrong to route internal calls through the edge gateway?
 
 ---
 
@@ -394,4 +413,4 @@ If you cannot answer these from memory, re-read section 1.
 | One replica idle, siblings busy | Its registry `status` is not `UP` — Break 4 |
 | Stopped service never disappears | Self-preservation is on |
 
-**Next:** Lab 03 — scaling and server-side load balancing with HAProxy (PRD §5.2–§5.3).
+**Next:** Lab 03 — server-side load balancing with HAProxy (PRD §5.2). Scaling a service to N replicas (PRD §5.3) follows in Lab 04.

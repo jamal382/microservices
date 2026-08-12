@@ -8,17 +8,19 @@ import org.springframework.web.client.RestClient;
 /**
  * Outbound clients, all resolved from configured addresses.
  *
- * <p>Sales is deliberately <em>not</em> a registry client. Only {@code catalog} looks
- * services up through Eureka; everything here uses an address supplied by config.
- * {@code catalog} and {@code payment} are single containers, so their address is a
- * container name. {@code inventory} is two containers sharing a Docker network alias,
- * so {@code http://inventory:8082} resolves to two A records that Docker's DNS
- * rotates — load balancing without a registry, and without a proxy.
+ * <p>Every address here comes from config and is resolved by Docker's embedded DNS.
+ * {@code catalog} and {@code payment} are single containers, so their address is just a
+ * container name. {@code inventory} is two containers sharing a network alias, so
+ * {@code http://inventory:8082} resolves to two A records that Docker's DNS rotates —
+ * load balancing without a proxy in the path.
  *
- * <p>The contrast with {@code catalog}'s config is the lesson: Docker DNS balances
- * across whatever answers the alias, but it cannot tell a started container from a
- * ready one, and a client that has cached the A record will keep using it. A registry
- * knows about readiness and status; DNS only knows about existence.
+ * <p>These are <em>east–west</em> calls and deliberately do not go through HAProxy.
+ * Routing them through the gateway would add a hop through one shared process for
+ * traffic that never leaves the network, and would make the gateway a single point of
+ * failure for internal traffic as well as external. The cost of keeping them direct is
+ * that DNS balances across whatever answers the alias without knowing whether it is
+ * <em>ready</em> — it reports existence, not health. HAProxy health-checks north–south
+ * traffic; this hop trusts the callee.
  */
 @Configuration
 public class RestClientConfig {

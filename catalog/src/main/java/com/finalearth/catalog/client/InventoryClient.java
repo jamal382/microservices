@@ -17,7 +17,7 @@ public class InventoryClient {
 
     private static final Logger log = LoggerFactory.getLogger(InventoryClient.class);
 
-    private static final String SERVICE_ID = "inventory";
+    private static final String INVENTORY_HOST = "inventory";
 
     private final RestClient restClient;
 
@@ -42,12 +42,12 @@ public class InventoryClient {
                     .toEntity(StockResponse.class);
             long millis = (System.nanoTime() - startNanos) / 1_000_000;
 
-            // X-Instance-Id is stamped by inventory's logging filter. The URL logged
-            // here is the service id we asked for, not the address we reached --
-            // Spring Cloud LoadBalancer resolved that per call -- so this header is
-            // how the caller sees which replica round-robin actually picked.
+            // X-Instance-Id is stamped by inventory's logging filter. The host logged
+            // here is the network alias we asked for, not the replica we reached --
+            // Docker's DNS picked that per lookup -- so this header is how the caller
+            // sees which of the two containers actually served the call.
             log.info("[catalog->inventory] GET http://{}/api/stock/{} -> {} ({} ms) served-by={} response={}",
-                    SERVICE_ID, productId, response.getStatusCode().value(), millis,
+                    INVENTORY_HOST, productId, response.getStatusCode().value(), millis,
                     response.getHeaders().getFirst("X-Instance-Id"), response.getBody());
 
             return response.getBody();

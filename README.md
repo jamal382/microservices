@@ -1,209 +1,340 @@
 # Spring Boot Microservices — Learning Project
 
-A small e-commerce system built in two phases to learn microservice architecture from the problems up, rather than from a finished `docker-compose.yml` down.
+A four-service e-commerce backend built to make distributed-systems concepts
+concrete: service-to-service calls, an edge gateway, server-side vs. client-side
+load balancing, schema-per-service data ownership, and the failure modes each of
+those introduces.
 
-**In place:** Spring Boot 4.1.0 · Java 21 · PostgreSQL · Docker Compose · Eureka (Spring Cloud 2025.1.2)
-**Planned:** HAProxy · Resilience4j · Kafka · Prometheus/Grafana · Jaeger · Elasticsearch/Kibana
+It is deliberately not a template to copy into production. Several things are
+simplified on purpose, and the interesting parts are the trade-offs — documented
+inline in the code and worked through in [`docs/labs/`](docs/labs/).
 
 ---
 
-## The idea
-
-**Phase 1** builds four services that work, with deliberate problems left in: hardcoded service URLs, no resilience, no way to scale, no visibility.
-
-**Phase 2** fixes those problems one at a time. Each fix is a lesson — and it lands because you felt the problem first.
+## Architecture
 
 ```
-catalog ──┐
-inventory ├── 4 Spring Boot services ── 1 Postgres (schema per service)
-sales     │
-payment ──┘
+                              ┌──────────────────────────┐
+        client ─────────────▶ │   HAProxy :80            │   ← the only way in
+                              │   routes by path prefix  │
+                              │   stats :8404            │
+                              └──┬────┬────┬────┬────┬───┘
+                                 │    │    │    │    │
+                        /products│    │    │    │    │/pgadmin
+                                 ▼    │    │    ▼    ▼
+                            catalog   │    │  payment  pgadmin
+                          /stock     ▼    ▼   /orders
+                            inventory×2  sales
+                                 ▲    ▲         │
+                                 │    └─────────┤  east–west calls go direct,
+                                 └──────────────┘  via Docker DNS — not back
+                                                   out through the gateway
 ```
 
-| Service | Host port | Owns |
+**No service publishes a host port.** `catalog:8081`, `inventory:8082`,
+`sales:8083`, `payment:8084` and `postgres:5432` are reachable only from inside
+the `backend` Docker network. HAProxy is the single container with a host
+binding, which is what makes the gateway non-optional rather than a convenience
+you can route around.
+
+**Two different resolution mechanisms, on purpose:**
+
+| | North–south (outside → in) | East–west (service → service) |
 |---|---|---|
-| catalog | 8081 | Products and categories |
-| inventory | 9092, 9093 | Stock levels and reservations — **two replicas** |
-| sales | 8083 | Orders |
-| payment | 8084 | Payments |
-| eureka | 8761 | Service registry (no domain of its own) |
+| Handled by | HAProxy | Docker's embedded DNS (`127.0.0.11`) |
+| In the request path | Yes, one hop | No — caller connects direct |
+| Health-aware | **Yes** — `option httpchk` on `/actuator/health` | **No** — DNS reports existence, not readiness |
+| Failure mode | one shared component; outage is total | per-caller; degrades independently |
 
-Inventory is the scaled service, so it has no single address. Both replicas listen on 8082 *inside* the network and share the `inventory` alias; the two host ports exist only so you can address a specific replica from your laptop.
+`inventory1` and `inventory2` share the `inventory` network alias, so
+`http://inventory:8082` resolves to **two** A records that Docker rotates. That
+one name is how both HAProxy and `catalog` reach the replicas without either
+naming a container.
+
+> There is no service registry. This project previously ran Netflix Eureka; it
+> was removed along with every Spring Cloud dependency. See
+> [Lab 02](docs/labs/02-service-discovery.md) (archived) for what the registry
+> did and which layer took over each of its jobs.
+
+---
+
+## Stack
+
+| | |
+|---|---|
+| Java | 21 |
+| Spring Boot | 4.1.0 |
+| Database | PostgreSQL 17 (`postgres:17-alpine`), one instance, schema per service |
+| Migrations | Flyway, per service |
+| Gateway | HAProxy 3.0 (`haproxy:3.0-alpine`) |
+| DB UI | pgAdmin 4 (`dpage/pgadmin4:9.13`) |
+| Build | Maven wrapper (`./mvnw`) per module — no parent aggregator POM |
+| Load testing | Locust |
+
+Each service is an independent Maven project with its own `pom.xml` and
+multi-stage `Dockerfile` (Maven build stage → `eclipse-temurin:21-jre-alpine`
+runtime, running as a non-root `spring` user).
 
 ---
 
 ## Quick start
 
-> Requires Docker and ~4 GB RAM free — the eight containers measure about 2.4 GB at idle.
-
 ```bash
-# 1. Build and start everything
 docker compose up -d --build
+```
+
+Wait for everything to report healthy (~40–60s on a cold build):
+
+```bash
 docker compose ps
+```
 
-# 2. Seed categories, products, and stock
+**Then load the sample data.** This step is manual and easy to miss:
+
+```bash
 docker compose exec -T postgres psql -U postgres -d microservices < infra/postgres/seed.sql
-
-# 3. Verify
-curl -s http://localhost:8081/api/products/1 | jq
 ```
 
-pgAdmin is at `localhost:5050` (`admin@example.com` / `admin`, override via `PGADMIN_EMAIL` / `PGADMIN_PASSWORD`). Add a server pointing at host `postgres`, port `5432`.
+> **Why it isn't automatic.** `infra/postgres/init.sql` *is* mounted into
+> `/docker-entrypoint-initdb.d/` and creates the four schemas and four DB users.
+> `seed.sql` is **not** mounted, because Postgres runs `initdb.d` scripts before
+> the services ever start — and the tables it inserts into don't exist until
+> Flyway migrates them. It has to run *after* the app containers are up.
+> Skip it and every `GET` returns `404` against empty tables.
 
-The Eureka dashboard is at `localhost:8761`.
-
----
-
-## Building
+Verify:
 
 ```bash
-# All services, from the project root
-for d in eureka-server catalog inventory payment sales; do (cd "$d" && ./mvnw clean compile); done
-
-# One service, packaged as a JAR
-cd catalog && ./mvnw clean package -DskipTests
+curl -s http://localhost/api/products/1
+curl -s http://localhost/api/stock/1
+curl -s -X POST http://localhost/api/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"customerId":1,"items":[{"productId":5,"quantity":2}],"paymentMethod":"CARD"}'
 ```
 
-## Running
+The last one should return `201` with `"status":"CONFIRMED"`.
 
-```bash
-docker compose up -d --build        # start, rebuilding images
-docker compose ps                   # container status
-docker compose stop                 # stop, keep data
-docker compose down -v              # stop and wipe volumes (clean DB reset)
-
-# Drop one inventory replica, to watch the registry evict it
-docker compose stop inventory2
-```
-
-Both inventory replicas start by default — they are declared as two services (`inventory1`, `inventory2`) sharing an `inventory` network alias, not via `--scale`, so each keeps a stable host port you can curl individually.
-
----
-
-## Exercising the API
-
-There is no collection endpoint anywhere — every read is by ID. That's the current surface:
-
-```bash
-# A product, and the same product with stock joined in from inventory
-curl -s http://localhost:8081/api/products/1 | jq
-curl -s http://localhost:8081/api/products/1/stock | jq
-
-# Stock, straight from a specific inventory replica
-curl -s http://localhost:9092/api/stock/1 | jq
-curl -s http://localhost:9093/api/stock/1 | jq
-
-# Reserve stock directly, bypassing sales
-curl -i -X POST http://localhost:9092/api/stock/reserve \
-  -H "Content-Type: application/json" \
-  -d '{"orderId": 999, "items": [{"productId": 1, "quantity": 1}]}'
-
-# Happy path — places an order across all four services
-curl -i -X POST http://localhost:8083/api/orders \
-  -H "Content-Type: application/json" \
-  -d '{"customerId": 100, "items": [{"productId": 1, "quantity": 2}], "paymentMethod": "CARD"}'
-
-# Read it back
-curl -s http://localhost:8083/api/orders/1 | jq
-```
-
-Two failure paths worth running, because they show where the interesting design decisions are:
-
-```bash
-# Out of stock → 409 Conflict, order left REJECTED
-# (product 10 seeds with zero stock; a large quantity fails on any product)
-curl -i -X POST http://localhost:8083/api/orders \
-  -H "Content-Type: application/json" \
-  -d '{"customerId": 100, "items": [{"productId": 10, "quantity": 100}], "paymentMethod": "CARD"}'
-
-# Payment declined → 402, order left PAYMENT_FAILED
-# The rule is "order total ends in .13", so this needs arithmetic:
-# 87 × 59.99 = 5219.13. Product 8 is seeded with 100 in stock.
-curl -i -X POST http://localhost:8083/api/orders \
-  -H "Content-Type: application/json" \
-  -d '{"customerId": 100, "items": [{"productId": 8, "quantity": 87}], "paymentMethod": "CARD"}'
-
-# Or hit the decline rule directly, without the order flow
-curl -i -X POST http://localhost:8084/api/payments \
-  -H "Content-Type: application/json" \
-  -d '{"orderId": 999, "amount": 10.13, "method": "CARD"}'
-```
-
-**After the decline, re-check the stock.** The reservation from step 5 is still held — sales marks the order `PAYMENT_FAILED` and stops, because inventory has no release endpoint. That leak is the missing compensating action in the saga, and it is the most instructive thing in the codebase right now.
-
----
-
-## Service discovery
-
-Catalog resolves inventory through Eureka; sales still reaches it through the Docker DNS alias. Same two replicas, two mechanisms, on purpose.
-
-```bash
-# Who is registered
-curl -s -H 'Accept: application/json' http://localhost:8761/eureka/apps | jq \
-  '.applications.application[] | {name, instances: [.instance[] | {instanceId, ipAddr, port: .port."$", status}]}'
-
-# Catalog's own view — the discoveryComposite component is its registry client
-curl -s http://localhost:8081/actuator/health | jq '.components.discoveryComposite'
-
-# Watch round-robin: repeat this and the served-by instance alternates
-for i in $(seq 6); do curl -s http://localhost:8081/api/products/1/stock > /dev/null; done
-docker compose logs --tail 6 catalog | grep 'catalog->inventory'
-
-# Stop a replica and watch it leave the registry (~30s: 10s heartbeat, 30s lease)
-docker compose stop inventory2
-```
-
-Full walkthrough, including the deliberate breakages: [docs/labs/02-service-discovery.md](docs/labs/02-service-discovery.md).
-
----
-
-## Watching what happens
-
-```bash
-docker compose logs -f                      # everything, live
-docker compose logs -f sales                # one service
-docker compose logs -f inventory1           # one specific replica
-docker compose logs --tail 50 catalog       # recent history instead of following
-docker compose logs --since 5m inventory1
-
-# Just request/response lines, no Spring startup noise
-docker compose logs -f | grep RequestResponseLoggingFilter
-
-# Which inventory replica served each call — the X-Instance-Id header
-# is stamped by inventory and logged by the caller
-docker compose logs -f catalog | grep 'catalog->inventory'
-
-# Replica IPs, to match against what the registry reports
-docker inspect -f '{{.Name}} {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
-  inventory1 inventory2
-```
-
----
-
-## Where things are
-
-| | |
+| URL | What |
 |---|---|
-| **[docs/PRD.md](docs/PRD.md)** | **Start here.** Requirements, architecture, data model, and rationale for every decision |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Diagrams and the Phase 1 request flows |
-| [docs/labs/](docs/labs/) | Hands-on exercises — one per Phase 2 capability |
-| [docs/learning-qa.md](docs/learning-qa.md) | Interview Q&A, each answer anchored to code in this repo |
-| `infra/postgres/` | Schema/user init and seed data |
-| `test/` | Locust load test and the `docker stats` sampler used for the numbers in the Q&A |
+| <http://localhost> | The gateway — all `/api/...` paths |
+| <http://localhost/pgadmin> | pgAdmin (no login prompt — see [Security notes](#security-notes)) |
+| <http://localhost:8404> | HAProxy stats dashboard |
 
-## What you should be able to explain when done
+Tear down (`-v` also drops the database volume):
 
-- Why there are two load balancers in the request path, and what each is for
-- Why services must not share database tables, and what replaces the foreign key you gave up
-- What a circuit breaker does when half-open, and why fallbacks are a design decision
-- When events beat synchronous calls — and what you give up in exchange
-- Which of metrics, traces, and logs answers which question
+```bash
+docker compose down        # keep data
+docker compose down -v     # reset to a clean database
+```
 
-## Status
+---
 
-| Phase | State |
+## API
+
+Everything is reached through `http://localhost` on port 80.
+
+| Method | Path | Service | Notes |
+|---|---|---|---|
+| `GET` | `/api/products/{id}` | catalog | Product with category name |
+| `GET` | `/api/products/{id}/stock` | catalog | **Cross-service** — catalog calls inventory |
+| `GET` | `/api/stock/{productId}` | inventory | Stock levels direct |
+| `POST` | `/api/stock/reserve` | inventory | Reserve units against an order |
+| `POST` | `/api/orders` | sales | Place an order — orchestrates all three |
+| `GET` | `/api/orders/{id}` | sales | Order with line items |
+| `POST` | `/api/payments` | payment | Process a payment |
+| `GET` | `/api/payments/order/{orderId}` | payment | Payment for an order |
+
+Any path not matching a prefix above falls through to `default_backend
+sales_backend` — a routing typo therefore lands on the wrong service rather than
+failing loudly. That is deliberate and explored in Lab 03, Break 1.
+
+### The order flow
+
+`POST /api/orders` is the one request that exercises the whole system:
+
+```
+client → HAProxy → sales ─┬→ catalog        (fetch price, compute total)
+                          ├→ inventory      (reserve stock)
+                          └→ payment        (charge)
+```
+
+Order status advances `PENDING → STOCK_RESERVED → CONFIRMED`, or terminates at
+`REJECTED` (stock reservation failed) or `PAYMENT_FAILED`. `CANCELLED` exists in
+the enum but nothing currently sets it.
+
+`catalog` also makes its own call to `inventory` for
+`GET /api/products/{id}/stock`, which is what gives the system a second,
+independent east–west hop to observe.
+
+---
+
+## Test fixtures
+
+The seed data contains deliberate edge cases:
+
+| Fixture | Behaviour |
 |---|---|
-| PRD | Complete |
-| Phase 1 — four Dockerized services | Working end to end. Known gap: a declined payment does not release reserved stock |
-| Phase 2 — service discovery | Eureka registry running; catalog resolves `inventory` via `@LoadBalanced` client-side load balancing |
-| Phase 2 — HAProxy, Resilience4j, Kafka, observability | Not started |
+| **Any amount ending in `.13`** | Payment declines with `402` and `"Insufficient funds"` — see `PaymentService.processPayment` |
+| **Product 10** (`13.13`, seeded with 0 stock) | Out-of-stock path; its price also triggers the decline rule |
+| **Product 9** (seeded with 1 unit) | Low stock — for concurrent-reservation / race testing |
+
+Payments are idempotent per `orderId`: a second `POST` for an order that already
+has a payment returns the existing record rather than charging twice.
+
+> **Seed drift.** `seed.sql` uses `ON CONFLICT (id) DO NOTHING`, so re-running it
+> restores *missing* rows but never resets rows that have changed. Once you have
+> placed orders, product 9 and 10 stock will no longer match the table above. Use
+> `docker compose down -v` for a genuinely clean slate.
+
+---
+
+## Services
+
+| Service | Internal port | Schema | DB user | Replicas |
+|---|---|---|---|---|
+| `catalog` | 8081 | `catalog` | `catalog_user` | 1 |
+| `inventory1`, `inventory2` | 8082 | `inventory` | `inventory_user` | **2**, sharing the `inventory` alias |
+| `sales` | 8083 | `sales` | `sales_user` | 1 |
+| `payment` | 8084 | `payment` | `payment_user` | 1 |
+
+Every service exposes `/actuator/health`, `/actuator/info` and
+`/actuator/metrics`. HAProxy health-checks the first of those; it is the contract
+that decides whether an instance receives traffic.
+
+**`X-Instance-Id`** — `inventory` stamps its container hostname on every
+response. Neither balancing layer tells a caller which replica it reached, so
+this header is the only way to observe distribution from the client side:
+
+```bash
+for i in $(seq 6); do
+  curl -s -D- -o /dev/null http://localhost/api/stock/1 | grep -i x-instance-id
+done
+```
+
+Both services also log one line per request (method, path, status, duration,
+response body) via a `RequestResponseLoggingFilter`, with `/actuator` traffic
+filtered out so health polling doesn't drown the log.
+
+---
+
+## Database
+
+One PostgreSQL instance, four schemas, four users — each service owns its schema
+and holds credentials for only that schema. `REVOKE ALL ON SCHEMA public FROM
+PUBLIC` in `init.sql` enforces the boundary. No service reads another's tables;
+they call each other's HTTP APIs instead, which is the whole point of the
+arrangement.
+
+Schema is managed by Flyway (`spring.jpa.hibernate.ddl-auto=validate` — Hibernate
+verifies the mapping and never alters the schema):
+
+```
+catalog/src/main/resources/db/migration/    V1 categories, V2 products
+inventory/src/main/resources/db/migration/  V1 stock_items, V2 stock_movements
+sales/src/main/resources/db/migration/      V1 orders,      V2 order_items
+payment/src/main/resources/db/migration/    V1 payments
+```
+
+Direct access:
+
+```bash
+docker compose exec postgres psql -U postgres -d microservices
+```
+
+---
+
+## Labs
+
+Guided walkthroughs in [`docs/labs/`](docs/labs/) — each has a concept section,
+the change, verification steps, and deliberate breakage with expected symptoms.
+
+| Lab | Status |
+|---|---|
+| **01 — First run** | Referenced by the other labs but not yet written |
+| [**02 — Service Discovery with Eureka**](docs/labs/02-service-discovery.md) | **Archived.** Does not match the running stack; kept for the registry model and its AP/staleness trade-offs |
+| [**03 — Edge Gateway and Load Balancing with HAProxy**](docs/labs/03-haproxy-load-balancing.md) | **Current.** Describes the system as it stands |
+
+Lab 03 is the one to read. It covers path-based routing, `server-template` and
+DNS re-resolution, why the host ports were removed, how a UI (pgAdmin) behind a
+subpath proxy differs from an API, and four break-it-yourself exercises.
+
+---
+
+## Load testing
+
+```bash
+source .venv/bin/activate
+cd test
+locust -f locustfile.py --host=http://localhost -u 300 -r 10 -t 10s
+```
+
+The default task hits `/api/products/1/stock`, which crosses both balancing
+layers in one request: HAProxy → `catalog`, then `catalog` → `inventory` over
+Docker DNS.
+
+`test/monitor.sh OUT.csv DURATION` samples `docker stats` for the key containers
+plus the Postgres connection count, for correlating load against resource use.
+
+---
+
+## Operations
+
+```bash
+docker compose ps                          # health of everything
+docker compose logs -f sales               # follow one service
+docker compose restart haproxy             # reload gateway config after editing
+docker compose stop inventory1             # simulate a replica loss
+curl -s 'http://localhost:8404/;csv' | cut -d, -f1,2,18   # backend states
+```
+
+`docker compose watch` rebuilds a service when its `src/` or `pom.xml` changes —
+`develop.watch` is configured for all four.
+
+Building outside Docker:
+
+```bash
+cd catalog && ./mvnw clean package
+```
+
+Each module is standalone; there is no aggregator POM, so build them
+individually.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `404` on every `GET` | Seed data never loaded — see [Quick start](#quick-start) |
+| `Connection refused` on `:8081`, `:9092`, `:5050` | Correct. Those host ports were removed; use `:80` |
+| Slot shows `MAINT (resolution)` in stats | No DNS answer for that name — normal for unused template slots |
+| Slot shows `DOWN` | Address resolves but `/actuator/health` failed |
+| Fast `503` from the gateway | Every slot in that backend is down |
+| Slow `503` with an `InventoryClient` log line | East–west call failed; no health check on that path to catch it early |
+| pgAdmin loads unstyled with 404s for `/static/*` | `SCRIPT_NAME` not reaching the container |
+
+---
+
+## Known limitations
+
+These are scope decisions, not bugs — most are the subject of a future lab.
+
+- **No compensating transactions.** If payment fails after stock is reserved, the
+  reservation is never released; the order just ends at `PAYMENT_FAILED`.
+  `inventory` has no confirm/release endpoint. This is the gap a saga pattern
+  would close, and it is flagged in `SalesService.placeOrder`.
+- **No circuit breakers or retries.** The east–west path has no health checking
+  at all — DNS will hand `catalog` the address of an `inventory` replica that is
+  up but failing every request. Lab 03's Break 4 demonstrates it.
+- **No authentication or authorization** anywhere, on any endpoint.
+- **Credentials are hardcoded** in `docker-compose.yml` and `init.sql`.
+- **`docs/PRD.md` is referenced** from code comments but does not exist in the
+  repo.
+- **Not a git repository** — there is no version history to fall back on.
+
+### Security notes
+
+pgAdmin runs with `PGADMIN_CONFIG_SERVER_MODE: "False"`, meaning **no login
+prompt**, and it is served from the same `:80` as the API. Any firewall rule that
+opens the API to a network also opens an unauthenticated database admin console
+to it. That is fine on a laptop and unacceptable anywhere shared — restrict
+`/pgadmin` with a `src` ACL in `infra/haproxy/haproxy.cfg`, or enable server
+mode, before exposing this stack.

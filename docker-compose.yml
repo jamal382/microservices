@@ -6,8 +6,6 @@ services:
       POSTGRES_DB: microservices
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -19,6 +17,9 @@ services:
     networks:
       - backend
 
+  # Reached through the gateway at http://localhost/pgadmin, not a host port.
+  # SCRIPT_NAME tells pgAdmin it lives under that prefix so it builds its own
+  # links and redirects to match -- HAProxy passes the path through unchanged.
   pgadmin:
     image: dpage/pgadmin4:9.13
     container_name: pgadmin
@@ -26,30 +27,18 @@ services:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
       PGADMIN_CONFIG_SERVER_MODE: "False"
-    ports:
-      - "5050:80"
+      SCRIPT_NAME: /pgadmin
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     depends_on:
       postgres:
         condition: service_healthy
-    networks:
-      - backend
-
-  # Service registry. Every business service registers here on startup and
-  # heartbeats to stay listed; callers resolve service ids against it instead of
-  # against a hardcoded host:port. Dashboard: http://localhost:8761
-  eureka:
-    build: ./eureka-server
-    container_name: eureka
-    ports:
-      - "8761:8761"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8761/actuator/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/pgadmin/misc/ping"]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 40s
+      start_period: 30s
     networks:
       - backend
 
@@ -67,12 +56,10 @@ services:
       DB_HOST: postgres
       DB_USER: catalog_user
       DB_PASSWORD: catalog_pass
-      EUREKA_URL: http://eureka:8761/eureka/
-    ports:
-      - "8081:8081"
+      # inventory1/inventory2 share the `inventory` network alias, so this one
+      # name resolves to both replicas' A records.
+      INVENTORY_URL: http://inventory:8082
     depends_on:
-      eureka:
-        condition: service_started
       postgres:
         condition: service_healthy
     healthcheck:
@@ -98,12 +85,7 @@ services:
       DB_HOST: postgres
       DB_USER: inventory_user
       DB_PASSWORD: inventory_pass
-      EUREKA_URL: http://eureka:8761/eureka/
-    ports:
-      - "9092:8082"
     depends_on:
-      eureka:
-        condition: service_started
       postgres:
         condition: service_healthy
     healthcheck:
@@ -116,6 +98,7 @@ services:
       backend:
         aliases:
           - inventory
+
   inventory2:
     build: ./inventory
     container_name: inventory2
@@ -130,12 +113,7 @@ services:
       DB_HOST: postgres
       DB_USER: inventory_user
       DB_PASSWORD: inventory_pass
-      EUREKA_URL: http://eureka:8761/eureka/
-    ports:
-      - "9093:8082"
     depends_on:
-      eureka:
-        condition: service_started
       postgres:
         condition: service_healthy
     healthcheck:
@@ -148,6 +126,7 @@ services:
       backend:
         aliases:
           - inventory
+
   sales:
     build: ./sales
     container_name: sales
@@ -165,8 +144,6 @@ services:
       CATALOG_URL: http://catalog:8081
       INVENTORY_URL: http://inventory:8082
       PAYMENT_URL: http://payment:8084
-    ports:
-      - "8083:8083"
     depends_on:
       postgres:
         condition: service_healthy
@@ -201,8 +178,6 @@ services:
       DB_HOST: postgres
       DB_USER: payment_user
       DB_PASSWORD: payment_pass
-    ports:
-      - "8084:8084"
     depends_on:
       postgres:
         condition: service_healthy
@@ -212,6 +187,35 @@ services:
       timeout: 5s
       retries: 5
       start_period: 40s
+    networks:
+      - backend
+
+  # The only container that publishes a host port, and therefore the only way
+  # into the system from outside. Every client API request enters here on :80
+  # and is routed by path; server-side load balancing across whatever is
+  # healthy behind each path. Backends are resolved through Docker's embedded
+  # DNS. Stats/dashboard on :8404.
+  haproxy:
+    image: haproxy:3.0-alpine
+    container_name: haproxy
+    ports:
+      - "80:80"
+      - "8404:8404"
+    volumes:
+      - ./infra/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      catalog:
+        condition: service_healthy
+      inventory1:
+        condition: service_healthy
+      inventory2:
+        condition: service_healthy
+      sales:
+        condition: service_healthy
+      payment:
+        condition: service_healthy
+      pgadmin:
+        condition: service_healthy
     networks:
       - backend
 

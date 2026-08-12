@@ -20,9 +20,10 @@ import java.nio.charset.StandardCharsets;
  * drown out the interesting lines.
  *
  * <p>Inventory is the service that gets scaled to several replicas, so it also
- * stamps its instance id onto every response as {@code X-Instance-Id}. That lets
- * a caller record which replica actually served it — with no load balancer in
- * Phase 1 there is otherwise no way to tell them apart from the client side.
+ * stamps its instance id onto every response as {@code X-Instance-Id}. Neither
+ * balancing path in front of it — HAProxy for external callers, Docker DNS for
+ * internal ones — tells the caller which replica it landed on, so this header is
+ * the only way to tell the two apart from the client side.
  */
 @Component
 public class RequestResponseLoggingFilter extends OncePerRequestFilter {
