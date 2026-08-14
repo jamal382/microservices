@@ -12,8 +12,7 @@ class MyUser(HttpUser):
 # source .venv/bin/activate
 
 
-# Load goes through the gateway on :80 -- services publish no host ports, so
-# :8081 no longer exists. /api/products routes to catalog_backend, and catalog's
-# own call out to inventory is balanced separately by Docker DNS across the two
-# replicas. One request, both balancing layers.
-# locust -f locustfile.py --host=http://localhost -u 300 -r 10 -t 10s
+# Load hits catalog directly on :8081. Each request makes catalog call out to
+# inventory, which Docker's DNS balances across the two replicas -- so the load
+# lands on catalog one-for-one and on the inventory pair split between them.
+# locust -f locustfile.py --host=http://localhost:8081 -u 300 -r 10 -t 10s

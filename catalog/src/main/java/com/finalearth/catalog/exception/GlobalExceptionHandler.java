@@ -14,6 +14,20 @@ import java.util.stream.Collectors;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    /**
+     * Inventory said "no such stock record". That is a real answer from a healthy
+     * service, so it reaches the caller as a plain 404 — it is not routed through a
+     * fallback and it never counts against the circuit breaker.
+     */
+    @ExceptionHandler(StockNotFoundException.class)
+    public ResponseEntity<ProblemDetail> handleStockNotFound(StockNotFoundException ex) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+        pd.setTitle("Stock not found");
+        pd.setType(URI.create("about:blank"));
+        pd.setProperty("productId", ex.getProductId());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(pd);
+    }
+
     @ExceptionHandler(ResponseStatusException.class)
     public ResponseEntity<ProblemDetail> handleResponseStatus(ResponseStatusException ex) {
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(ex.getStatusCode(), ex.getReason());

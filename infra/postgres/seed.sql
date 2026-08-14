@@ -18,7 +18,12 @@ INSERT INTO catalog.products (id, sku, name, description, price, category_id, ac
 (7, 'BOOK-003', 'Spring Microservices in Action', 'Spring Boot & Cloud guide', 42.00, 2, true),
 (8, 'CLOT-001', 'Developer Hoodie', 'Cotton black hoodie', 59.99, 3, true),
 (9, 'CLOT-002', 'Tech Conference T-Shirt', '100% cotton tee', 25.00, 3, true),
-(10, 'CLOT-003', 'Out of Stock Special Shirt', 'Limited edition item - zero stock', 13.13, 3, true)
+(10, 'CLOT-003', 'Out of Stock Special Shirt', 'Limited edition item - zero stock', 13.13, 3, true),
+-- Deliberately has NO row in inventory.stock_items below. GET /api/products/11/stock
+-- therefore makes catalog call inventory and receive a 404 -- a *business* answer from
+-- a *healthy* service. Used in Lab 04 to show that such answers are ignored by the
+-- circuit breaker rather than counted as failures.
+(11, 'MISC-001', 'Unstocked Curiosity', 'Exists in catalog, unknown to inventory', 19.99, 3, true)
 ON CONFLICT (id) DO NOTHING;
 
 SELECT setval('catalog.products_id_seq', (SELECT MAX(id) FROM catalog.products));

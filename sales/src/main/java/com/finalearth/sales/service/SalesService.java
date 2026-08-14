@@ -7,7 +7,11 @@ import com.finalearth.sales.dto.*;
 import com.finalearth.sales.entity.Order;
 import com.finalearth.sales.entity.OrderItem;
 import com.finalearth.sales.entity.OrderStatus;
+import com.finalearth.sales.exception.DependencyBusinessException;
+import com.finalearth.sales.exception.DependencyUnavailableException;
 import com.finalearth.sales.repository.OrderRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,6 +24,8 @@ import java.util.UUID;
 
 @Service
 public class SalesService {
+
+    private static final Logger log = LoggerFactory.getLogger(SalesService.class);
 
     private final OrderRepository orderRepository;
     private final CatalogClient catalogClient;
@@ -74,7 +80,17 @@ public class SalesService {
             inventoryClient.reserveStock(savedOrder.getId(), reserveItems);
             savedOrder.setStatus(OrderStatus.STOCK_RESERVED);
             savedOrder = saveOrder(savedOrder);
-        } catch (ResponseStatusException e) {
+        } catch (DependencyBusinessException e) {
+            // Inventory said no on the merits (not enough stock). A definite answer,
+            // so the order is definitely rejected.
+            savedOrder.setStatus(OrderStatus.REJECTED);
+            saveOrder(savedOrder);
+            throw e;
+        } catch (DependencyUnavailableException e) {
+            // We never got an answer. If the circuit was open the request certainly
+            // never left this process; otherwise it may or may not have been applied.
+            // Either way nothing was confirmed, so the order stops here rather than
+            // proceeding to charge a customer for stock we cannot vouch for.
             savedOrder.setStatus(OrderStatus.REJECTED);
             saveOrder(savedOrder);
             throw e;
@@ -84,9 +100,20 @@ public class SalesService {
         // reserved stock is not released back (known limitation of this scope).
         try {
             paymentClient.processPayment(savedOrder.getId(), savedOrder.getTotalAmount(), req.paymentMethod());
-        } catch (ResponseStatusException e) {
+        } catch (DependencyBusinessException e) {
+            // The provider answered: declined. An authoritative "no money moved".
             savedOrder.setStatus(OrderStatus.PAYMENT_FAILED);
             saveOrder(savedOrder);
+            throw e;
+        } catch (DependencyUnavailableException e) {
+            // Deliberately NOT marked PAYMENT_FAILED. That status asserts the charge
+            // did not happen, and outside an open circuit we do not know that: the
+            // request may have been authorised and only the response lost. The order
+            // is left at STOCK_RESERVED — visibly unfinished — because a truthful
+            // "unresolved" beats a tidy status that might be a lie. Reconciling it is
+            // exactly the job a saga or an outbox would take on.
+            log.error("[order] order={} left at {} — payment outcome UNKNOWN ({})",
+                    savedOrder.getId(), savedOrder.getStatus(), e.getMessage());
             throw e;
         }
 

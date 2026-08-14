@@ -35,7 +35,27 @@ public class CatalogService {
         Product product = productRepository.findById(id)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Product not found with id: " + id));
 
-        InventoryClient.StockResponse stock = inventoryClient.getStockByProductId(id);
+        // Never throws for a dependency failure: InventoryClient's fallback converts one
+        // into a degraded lookup. The product half of this response is ours and is always
+        // available, so answering with it beats failing the whole request because a
+        // different service is unwell -- which is the entire argument for a fallback.
+        InventoryClient.StockLookup stock = inventoryClient.getStockByProductId(id);
+
+        if (stock.degraded()) {
+            return new ProductStockDto(
+                    product.getId(),
+                    product.getSku(),
+                    product.getName(),
+                    product.getPrice(),
+                    product.getActive(),
+                    null,
+                    null,
+                    null,
+                    ProductStockDto.StockStatus.UNAVAILABLE,
+                    stock.reason());
+        }
+
+        boolean inStock = stock.quantityAvailable() != null && stock.quantityAvailable() > 0;
 
         return new ProductStockDto(
                 product.getId(),
@@ -45,8 +65,9 @@ public class CatalogService {
                 product.getActive(),
                 stock.quantityAvailable(),
                 stock.quantityReserved(),
-                stock.quantityAvailable() != null && stock.quantityAvailable() > 0
-        );
+                inStock,
+                inStock ? ProductStockDto.StockStatus.AVAILABLE : ProductStockDto.StockStatus.OUT_OF_STOCK,
+                null);
     }
 
     private ProductDto mapToDto(Product p) {

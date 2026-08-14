@@ -17,24 +17,22 @@ services:
     networks:
       - backend
 
-  # Reached through the gateway at http://localhost/pgadmin, not a host port.
-  # SCRIPT_NAME tells pgAdmin it lives under that prefix so it builds its own
-  # links and redirects to match -- HAProxy passes the path through unchanged.
   pgadmin:
     image: dpage/pgadmin4:9.13
     container_name: pgadmin
+    ports:
+      - "5050:80"
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
       PGADMIN_CONFIG_SERVER_MODE: "False"
-      SCRIPT_NAME: /pgadmin
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:80/pgadmin/misc/ping"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/misc/ping"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -45,6 +43,8 @@ services:
   catalog:
     build: ./catalog
     container_name: catalog
+    ports:
+      - "8081:8081"
     develop:
       watch:
         - action: rebuild
@@ -71,9 +71,14 @@ services:
     networks:
       - backend
 
+  # Each replica publishes its own host port so a single instance can be
+  # addressed directly -- which is how you take one out of service, or hit one
+  # while leaving the other healthy, when exercising a circuit breaker.
   inventory1:
     build: ./inventory
     container_name: inventory1
+    ports:
+      - "9092:8082"
     develop:
       watch:
         - action: rebuild
@@ -85,6 +90,7 @@ services:
       DB_HOST: postgres
       DB_USER: inventory_user
       DB_PASSWORD: inventory_pass
+      LAB_FAULT_INJECTION: "true"
     depends_on:
       postgres:
         condition: service_healthy
@@ -102,6 +108,8 @@ services:
   inventory2:
     build: ./inventory
     container_name: inventory2
+    ports:
+      - "9093:8082"
     develop:
       watch:
         - action: rebuild
@@ -113,6 +121,7 @@ services:
       DB_HOST: postgres
       DB_USER: inventory_user
       DB_PASSWORD: inventory_pass
+      LAB_FAULT_INJECTION: "true"
     depends_on:
       postgres:
         condition: service_healthy
@@ -130,6 +139,8 @@ services:
   sales:
     build: ./sales
     container_name: sales
+    ports:
+      - "8083:8083"
     develop:
       watch:
         - action: rebuild
@@ -187,35 +198,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 40s
-    networks:
-      - backend
-
-  # The only container that publishes a host port, and therefore the only way
-  # into the system from outside. Every client API request enters here on :80
-  # and is routed by path; server-side load balancing across whatever is
-  # healthy behind each path. Backends are resolved through Docker's embedded
-  # DNS. Stats/dashboard on :8404.
-  haproxy:
-    image: haproxy:3.0-alpine
-    container_name: haproxy
-    ports:
-      - "80:80"
-      - "8404:8404"
-    volumes:
-      - ./infra/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-    depends_on:
-      catalog:
-        condition: service_healthy
-      inventory1:
-        condition: service_healthy
-      inventory2:
-        condition: service_healthy
-      sales:
-        condition: service_healthy
-      payment:
-        condition: service_healthy
-      pgadmin:
-        condition: service_healthy
     networks:
       - backend
 
