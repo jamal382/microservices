@@ -70,9 +70,9 @@ public class SalesService {
         savedOrder.setOrderNumber(generateOrderNumber(savedOrder.getId()));
         savedOrder = saveOrder(savedOrder);
 
-        // Step 5: Reserve stock. This call is final in this trimmed scope — there
-        // is no confirm/release endpoint on inventory (see docs/PRD.md §4.4-4.6),
-        // so a reservation is never explicitly rolled back or converted over HTTP.
+        // Step 5: Reserve stock. This call is final in this trimmed scope — inventory
+        // exposes no confirm/release endpoint, so a reservation is never explicitly
+        // rolled back or converted over HTTP.
         try {
             var reserveItems = req.items().stream()
                     .map(i -> new InventoryClient.ReserveItem(i.productId(), i.quantity()))

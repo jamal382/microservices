@@ -413,4 +413,7 @@ If you cannot answer these from memory, re-read section 1.
 | One replica idle, siblings busy | Its registry `status` is not `UP` — Break 4 |
 | Stopped service never disappears | Self-preservation is on |
 
-**Next:** Lab 03 — server-side load balancing with HAProxy (PRD §5.2). Scaling a service to N replicas (PRD §5.3) follows in Lab 04.
+**Next:** [Lab 03 — Edge Gateway and Load Balancing with HAProxy](03-haproxy-load-balancing.md),
+which replaced this layer and was itself archived. What actually runs today is in
+[Lab 04](04-resilience4j.md) and [Lab 05](05-resilience-patterns.md): no registry, no
+gateway, and the protection moved to the caller instead.

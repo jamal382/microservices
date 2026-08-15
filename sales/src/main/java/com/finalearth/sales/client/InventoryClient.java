@@ -30,11 +30,11 @@ import java.util.List;
  * double-reserves; the customer's order then holds stock nobody can sell, and the
  * discrepancy surfaces days later in a stock count with no trace of where it came from.
  *
- * <p>Retrying safely here would need inventory to accept an idempotency key and
- * deduplicate on it, which it does not (see {@code docs/PRD.md} §4.4-4.6). Absent that,
- * the honest configuration is a circuit breaker with no retry: still protected against a
- * dead dependency, without inventing an at-least-once write on top of an API that cannot
- * support one. {@code payment} makes the same trade for the same reason.
+ * <p>Retrying safely here would need inventory to accept an idempotency key and deduplicate
+ * on it, which it does not. Absent that, the honest configuration is a circuit breaker with
+ * no retry: still protected against a dead dependency, without inventing an at-least-once
+ * write on top of an API that cannot support one. {@code payment} makes the same trade for
+ * the same reason.
  *
  * <p><strong>Rejection here is the safest outcome in the system.</strong> That is the
  * argument for putting a rate limiter and a bulkhead in front of a call that must not be

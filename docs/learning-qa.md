@@ -12,12 +12,13 @@ codebase, which is what turns a memorized definition into a credible answer.
 6. [Database and migrations](#6-database-and-migrations)
 7. [Microservices architecture](#7-microservices-architecture)
 8. [Inter-service communication and resilience](#8-inter-service-communication-and-resilience)
-9. [Service discovery with Eureka](#9-service-discovery-with-eureka)
-10. [Docker](#10-docker)
-11. [Docker Compose and load balancing](#11-docker-compose-and-load-balancing)
-12. [Performance and concurrency](#12-performance-and-concurrency)
-13. [Testing](#13-testing)
-14. [Questions about the project itself](#14-questions-about-the-project-itself)
+9. [Resilience4j in depth](#9-resilience4j-in-depth)
+10. [Service discovery with Eureka](#10-service-discovery-with-eureka)
+11. [Docker](#11-docker)
+12. [Docker Compose and load balancing](#12-docker-compose-and-load-balancing)
+13. [Performance and concurrency](#13-performance-and-concurrency)
+14. [Testing](#14-testing)
+15. [Questions about the project itself](#15-questions-about-the-project-itself)
 
 ---
 
@@ -562,10 +563,14 @@ A registry (Eureka, Consul) where instances register on startup and callers look
 logical name. It solves the problem that a hardcoded URL holds exactly one address: you
 can't scale behind it, and it can't tell you the target is down.
 
-*In this project:* both approaches run side by side on purpose. Catalog resolves
-`http://inventory` through Eureka with a `@LoadBalanced` client; sales still reads
-`${CATALOG_URL:http://localhost:8081}` from an environment variable, kept as the contrast
-case. Section 9 covers the registry in detail.
+The second half of that sentence is the part to be careful with. A registry fixes the
+*address* problem and only half of the *health* problem: it knows an instance stopped
+heartbeating, but not that one which is still heartbeating is failing every request.
+
+*In this project:* discovery is done by **Docker's embedded DNS**, not a registry. Both
+inventory replicas share an `inventory` network alias, so one name resolves to two A records
+with nothing in the request path between caller and callee. Eureka was run here and then
+removed — section 10 keeps the registry model and the reasoning for dropping it.
 
 **Q: What does an API gateway do?**
 
@@ -592,6 +597,11 @@ touching the network. **HALF_OPEN**: after a wait, a few trial calls are allowed
 closes it, failure opens it again. The value is that a slow dependency stops consuming the
 caller's threads, so one sick service doesn't cascade into a dead system.
 
+*In this project:* one breaker per dependency, opening on failure rate **or** slow-call
+rate. With both replicas stalling, `catalog` drops from 5.13s per call to 0.012s once the
+breaker opens — the same degraded answer, 400× faster, and `inventory` stops receiving
+traffic it can't serve.
+
 **Q: What's the difference between a retry and a circuit breaker? Are they safe together?**
 
 A retry assumes the failure is transient; a breaker assumes it isn't. Together they're
@@ -605,9 +615,9 @@ Without one, a "failure" that takes 60 seconds looks like success-in-progress, s
 breaker never trips and the caller's threads stay pinned. A timeout is what converts a hang
 into a countable failure.
 
-*In this project:* the RestClient calls have no explicit timeouts yet — a known gap, and
-under the load test it showed up as latency climbing to a 1.1s p99 with nothing shedding
-load.
+*In this project:* every RestClient is bounded at 1s connect / 2s read, with payment at 5s
+because a card authorisation legitimately takes longer than a database read. Before those
+existed the load test showed latency climbing to a 1.1s p99 with nothing shedding load.
 
 **Q: What is a fallback, and is it always the right thing?**
 
@@ -615,6 +625,10 @@ A degraded answer when the dependency is unavailable — cached data, an empty l
 It's a *product* decision, not a technical one: returning "stock unknown" is fine, returning
 "in stock" when you don't know is a lie that ships an order you can't fulfil. Some calls
 have no acceptable fallback and should just fail.
+
+*In this project:* `catalog` falls back to a `degraded` stock lookup with `null` quantities
+and a reason — the product data is ours and still useful. `sales` → `payment` has no
+fallback at all, because there is no degraded version of "money moved".
 
 **Q: Which failure modes appear in a distributed system that don't exist in a monolith?**
 
@@ -625,7 +639,281 @@ and the remedies are most of what "microservices experience" means.
 
 ---
 
-## 9. Service discovery with Eureka
+## 9. Resilience4j in depth
+
+**Q: What is Resilience4j, and why it rather than Hystrix?**
+
+A lightweight fault-tolerance library for Java 8+. Hystrix has been in maintenance mode
+since 2018 and Spring Cloud dropped it; Resilience4j is the successor everyone moved to.
+Practically, the differences that matter are that it's modular — you take only the patterns
+you use, each as its own small jar with no dependency beyond Vavr-free core — and that it
+decorates functions rather than requiring you to extend a `HystrixCommand` base class. It
+also doesn't force a thread pool on you: Hystrix isolated everything on threads, whereas
+Resilience4j's default bulkhead is a semaphore, which is far cheaper.
+
+**Q: What are its core modules?**
+
+Six: **CircuitBreaker**, **Retry**, **RateLimiter**, **Bulkhead**, **TimeLimiter**, and
+**Cache**. Each is independent and each can be used as an annotation, a functional
+decorator, or programmatically from the registry.
+
+*In this project:* all five of the first ones are on the `catalog` → `inventory` call. No
+cache — every read here needs to be current.
+
+**Q: How do the annotations actually work?**
+
+They're Spring AOP aspects. At startup a proxy is created around the bean and the aspects
+wrap the method call. Two consequences follow that catch people out:
+
+- **You need the AOP starter on the classpath.** Without it the annotations are *silently
+  ignored* — no error, no warning, and every call runs completely unprotected. On Spring
+  Boot 4 the artifact is `spring-boot-starter-aspectj`; it was `-aop` up to Boot 3.
+- **Self-invocation bypasses everything.** Calling an annotated method from another method
+  in the same class doesn't go through the proxy, so all the aspects are skipped, silently.
+
+*In this project:* the join helper on `InventoryClient` is deliberately a `static` method
+taking the future as an argument, precisely so nobody can write it as an internal call and
+quietly strip all five patterns off the request path.
+
+**Q: If you put `@Retry` and `@CircuitBreaker` on the same method, which one runs first?**
+
+Retry is on the outside. The full order is fixed and set by each aspect's `Ordered` value —
+lower value means further out:
+
+```
+Retry ( CircuitBreaker ( RateLimiter ( TimeLimiter ( Bulkhead ( call ) ) ) ) )
+```
+
+The order you write the annotations in makes no difference. Each is overridable
+(`resilience4j.retry.retryAspectOrder` and friends), but rarely worth touching.
+
+Two consequences are worth saying out loud, because they're what the question is really
+testing:
+
+- **Every retry attempt is counted separately by the breaker**, since the breaker is inside
+  the retry. Three attempts against a dead dependency put three failures in the sliding
+  window, not one — so a retrying caller trips its own breaker about three times faster
+  than the config suggests.
+- **Once the breaker is open it throws instantly**, and the retry sitting outside would
+  happily retry *that* — burning the whole budget on a call that never leaves the process.
+  So `CallNotPermittedException` goes in the retry's `ignore-exceptions`.
+
+**Q: What's the difference between a rate limiter and a bulkhead?**
+
+They sound like the same idea and they're not. A **rate limiter** counts calls *started per
+unit of time* and refills on a clock, regardless of whether earlier calls have finished. A
+**bulkhead** counts calls *in flight right now* and refills only when one completes,
+regardless of how fast they arrive.
+
+The arithmetic makes it obvious: twenty concurrent calls that each take 5ms is about 4000
+calls per second — comfortably inside a bulkhead of 20 and forty times over a limiter of
+100/s. Twenty concurrent calls that each take 5 *seconds* is 4 calls per second — trivial
+for the limiter and permanently at the bulkhead's ceiling. Neither implies the other.
+
+The one-liner: **the rate limiter protects the callee, the bulkhead protects you.**
+
+**Q: Semaphore bulkhead or thread-pool bulkhead?**
+
+Semaphore by default. It's just a counter — the call runs on the caller's own thread, so it
+costs almost nothing and `ThreadLocal` state (MDC, security context, transaction context)
+survives for free. A thread-pool bulkhead hands the call to its own pool and returns a
+future, which costs a thread hand-off and breaks every `ThreadLocal` you were relying on.
+
+You pay for the thread pool when you need to **walk away from a call in progress** — which
+is what a time limiter does, and it's the only reason to use one here.
+
+*In this project:* `catalog` uses `THREADPOOL` because it has a `@TimeLimiter`; a semaphore
+would release its permit the moment the method returned a future — i.e. immediately —
+capping nothing at all. `sales` uses `SEMAPHORE` on all three paths, because nothing there
+should be abandoned mid-flight.
+
+**Q: What's a `TimeLimiter`, and why not just use it instead of a socket timeout?**
+
+Because **a time limiter cancels the waiting, not the work.** It needs a
+`CompletionStage`-returning method; when the deadline fires it completes the future
+exceptionally and releases the caller. The thread actually blocked in the socket read stays
+blocked — a thread parked on blocking I/O can't be interrupted — so it sits there until the
+read timeout releases it.
+
+That makes it a deadline you can state as one number and reason about, on top of socket
+timeouts that bound each I/O step separately. It is not a replacement for them. Drop the
+socket timeouts and keep the time limiter and you've built a system that reports fast
+failures while silently accumulating blocked threads forever.
+
+*In this project:* the deadline is 1.5s and the read timeout is 2s — deliberately below, so
+the deadline is what fires first and the behaviour is unambiguous. The cost is visible: the
+caller is released at 1.5s, the bulkhead thread stays occupied until 2s.
+
+**Q: So how many things in your system are called "timeout"?**
+
+Three, and they do different jobs. The **socket timeouts** (1s connect, 2s read) bound each
+I/O step and are the only ones the blocked worker actually observes. The **time limiter**
+(1.5s) bounds the whole attempt and is what the caller waits for. The
+**slow-call-duration-threshold** (1s) bounds nothing at all — it just tells the breaker to
+count a call as a failure even though it succeeded.
+
+That third one catches the nastiest failure mode there is: a dependency that answers
+correctly, just slowly enough to exhaust its callers' threads. There's no exception to catch,
+so a breaker watching only for errors never fires.
+
+**Q: How does the circuit breaker decide when to open?**
+
+A sliding window of recent calls, either **count-based** (the last N calls) or
+**time-based** (calls in the last N seconds). It opens when the failure rate *or* the
+slow-call rate crosses its threshold — but only once `minimumNumberOfCalls` have been
+recorded, so one unlucky failure at startup can't open it. After
+`waitDurationInOpenState` it moves to HALF_OPEN and admits a few trial calls; they decide
+whether it closes or opens again.
+
+Time-based is usually the better production choice under bursty traffic. Count-based is used
+here because it makes the demo deterministic — you can say exactly which request trips it.
+
+**Q: `recordExceptions` vs `ignoreExceptions` — what's the difference?**
+
+This is the question that separates people who've configured it from people who've read
+about it. There are **three** buckets, not two:
+
+| Bucket | Config | Effect |
+|---|---|---|
+| Failure | `recordExceptions` | pushes the breaker toward OPEN |
+| Ignored | `ignoreExceptions` | not counted at all, as if the call never happened |
+| Success | *anything unlisted* | holds the breaker CLOSED |
+
+The trap is that `recordExceptions` is an **allow-list**: once you set it, everything you
+didn't list silently becomes a *success*. So "I didn't list it, therefore it's neutral" is
+wrong — not listing something is an active choice to count it as healthy.
+
+*In this project:* a 404 for a product with no stock row, a 409 for insufficient stock and a
+402 declined card are all **ignored**. They're successful conversations with healthy
+services — failures of the *order*, not of the *system*. Count them and browsing unstocked
+products would trip a breaker and cut off a service that was never unwell.
+
+**Q: Should a rate-limiter or bulkhead rejection count as a circuit-breaker failure?**
+
+No — and it's worth being precise about why. The dependency was never contacted, so the
+rejection is evidence about *your* load, not its health. A call you refused to make tells
+you nothing about whether the callee is up.
+
+But "don't record it" isn't enough, because of the allow-list trap above. In Resilience4j's
+fixed aspect order the rate limiter and bulkhead sit *inside* the breaker, so their
+exceptions pass through its accounting on the way out. Leave `RequestNotPermitted` and
+`BulkheadFullException` unlisted and they don't just fail to open the breaker — they count
+as **successes** and prop the health metrics up at exactly the moment the system is
+saturated. They have to be explicitly ignored.
+
+*In this project:* a 45-order burst produced 3 bulkhead rejections alongside 15 real
+timeouts. The breaker opened on the 15 and ignored the 3. Without those `ignore-exceptions`
+lines the 3 would have diluted a 100% failure rate to 83%.
+
+**Q: A metric that improves under load — why is that the worst kind of bug?**
+
+Because it removes the signal at the moment you need it. Anything that counts self-inflicted
+rejections as successes gets *better* the harder the system is pushed: more load, more
+rejections, higher apparent success rate. The dashboard goes green as the service falls
+over, alerts don't fire, and autoscaling doesn't trigger. A metric that's merely wrong is
+recoverable; a metric that's inversely correlated with health is actively misleading.
+
+**Q: When should you not retry?**
+
+When the operation isn't idempotent. The key insight is that **a read timeout means the
+response was lost, not the request** — the work may well have been committed on the other
+side. Retry a non-idempotent write and you double it, silently, with nothing in the logs
+tying the duplicate to its cause.
+
+*In this project:* `sales` retries `GET /api/products/{id}` and nothing else. Reserving
+stock and charging a card have no `@Retry` at all. `payment` does actually deduplicate by
+`orderId`, so a retry would be safe *today* — the annotation is still omitted, because that
+safety is a property of the callee's current implementation rather than a guarantee of its
+contract, and a retry configured on that basis becomes a double-charge the day it changes.
+
+**Q: How would you make those retries safe?**
+
+An idempotency key: the caller generates a unique id per logical operation, sends it with
+the request, and the callee stores it and returns the original result on a repeat. That
+turns at-least-once delivery into effectively-once *at the callee*, which is the only place
+it can be enforced. Retrying without one isn't courage, it's a bet.
+
+**Q: Why exponential backoff, and why jitter?**
+
+Backoff because a struggling dependency needs time, and a fixed interval just keeps hitting
+it at a constant rate. Jitter because without it every caller that failed at the same moment
+retries at the same moment — you've synchronised the whole fleet into a thundering herd, and
+the retry storm becomes the outage.
+
+*In this project:* 200ms base, multiplier 2, three attempts. Single-caller demo, so jitter
+isn't configured — under real fan-out it should be.
+
+**Q: What makes a good fallback?**
+
+That it doesn't invent data the caller will act on. A fallback returning "stock unknown" is
+honest; one returning "in stock" is a lie that ships an order you can't fulfil. When the only
+available fallback would be a lie, failing is the correct behaviour.
+
+*In this project:* `catalog` returns the product with `null` quantities and a
+`degraded` flag. `sales` → `catalog` has no fallback, because there's no honest guess at a
+price, and `sales` → `payment` has none, because there's no degraded version of a charge.
+
+**Q: Where does breaker state live? Is it shared across instances?**
+
+In memory, per JVM. Each instance learns independently that a dependency is down — so with
+five replicas, five breakers each need their own `minimumNumberOfCalls` before any of them
+reacts. The same is true of rate limiters: five replicas at 100/s is a real ceiling of
+500/s. Anything genuinely global needs shared state — Redis, or a service mesh doing it at
+the network layer.
+
+**Q: How do you observe any of this in production?**
+
+Resilience4j publishes events (`onError`, `onRetry`, `onStateTransition`, `onCallRejected`)
+and Micrometer metrics, plus actuator endpoints — `/actuator/circuitbreakers`,
+`/actuator/ratelimiters`, `/actuator/bulkheads`, `/actuator/timelimiters` and their
+`*events` variants. The one thing to alert on is **state transitions**: `CLOSED → OPEN` is
+the moment your system decided a dependency is unhealthy, and it should page someone.
+
+*In this project:* a `RegistryEventConsumer` attaches loggers to every instance as it's
+created — lazily-created ones included — so the log reads as a running commentary on the
+library's reasoning. A correlation id ties the whole chain together, which took real work:
+`MDC` is a `ThreadLocal`, so the thread-pool bulkhead needs a `ContextPropagator`, and so
+does the time limiter's scheduler, because *that* is the thread that completes the future on
+a deadline and therefore runs the breaker's accounting, the retry's decision and the
+fallback.
+
+**Q: Should this live in the application or in a service mesh?**
+
+Timeouts, retries, rate limits and circuit breaking can all be done by a sidecar like Envoy,
+and there's a real argument for it: uniform policy across languages, changeable without a
+redeploy.
+
+What a mesh can't do is the part that requires knowing what the call *means*. It sees a 402
+and a 500 as two HTTP responses; it can't know that a declined card is a healthy provider
+doing its job and must never trip a breaker, or that this POST is unsafe to retry while that
+GET is fine, or that "stock unknown" is an acceptable answer and a guessed price isn't. That
+judgement lives in the application. In practice you often want both — the mesh as a blanket
+floor, the library where the semantics matter.
+
+**Q: You've got five patterns on one call. Isn't that over-engineering?**
+
+It would be if they were on everything, and they aren't. That method is the one path in the
+system that's idempotent, safely abandonable and has an honest degraded answer — it can
+afford every pattern. The three write paths in `sales` deliberately have fewer: no retry, no
+time limiter, no fallback.
+
+The framing I'd push back on is "more resilience is better". Four of the five patterns
+*refuse calls that would otherwise have succeeded* — every one of them trades availability
+now for the ability to keep serving later. That's a trade you make deliberately, per
+dependency, which is why every limit in this project has a comment explaining its number.
+
+---
+
+## 10. Service discovery with Eureka
+
+> **Archived — this project no longer runs Eureka.** It was built, run, and then removed
+> in favour of Docker's DNS aliases; see [Lab 02](labs/02-service-discovery.md). The
+> *In this project* notes below are written in the past tense and describe what the
+> registry did **while it ran**, because the configuration decisions are still the useful
+> part to be able to talk through. Section 12 describes what resolves service names today.
+>
+> Being able to say "we took it out, and here's what it was buying us" is a stronger answer
+> than never having run one — so the last question in this section is the one to lead with.
 
 **Q: What is Eureka, and — more importantly — what is it not?**
 
@@ -646,8 +934,8 @@ and instance ID. **Renew** — it heartbeats on an interval to keep the lease al
 **Evict** — if heartbeats stop for longer than the lease duration, the registry drops the
 instance, and callers learn about it at their next fetch.
 
-*In this project:* inventory registers and heartbeats every 10s with a 30s lease; catalog
-fetches every 10s and never registers.
+*In this project, while it ran:* inventory registered and heartbeated every 10s with a 30s
+lease; catalog fetched every 10s and never registered.
 
 **Q: If callers cache the registry, isn't the data always slightly stale?**
 
@@ -667,9 +955,9 @@ that is reached at a fixed address but calls scaled peers only needs to fetch; a
 that is scaled but calls nobody only needs to register. Setting both to `true` everywhere
 out of habit hides the fact that they answer different questions.
 
-*In this project:* the pair is deliberately split to make that visible — inventory is
-`register=true, fetch=false` (it is the scaled one, and makes no outbound calls); catalog is
-`register=false, fetch=true` (it is reached at a fixed port, and calls inventory).
+*In this project, while it ran:* the pair was deliberately split to make that visible —
+inventory was `register=true, fetch=false` (the scaled one, making no outbound calls) and
+catalog was `register=false, fetch=true` (reached at a fixed port, and calls inventory).
 
 **Q: Why does the Eureka server itself set both flags to `false`?**
 
@@ -689,9 +977,10 @@ rewrites the URL to a real `ip:port` before the request leaves the JVM.
 Worth being explicit in an interview: there is no DNS record for `inventory` in that flow.
 `ping inventory` from the caller would be a different mechanism entirely.
 
-*In this project:* `RestClientConfig` builds `inventoryRestClient` from the load-balanced
-builder with `baseUrl("http://inventory")`, and `InventoryClient` just calls
-`/api/stock/{id}` against it.
+*In this project, while it ran:* `RestClientConfig` built `inventoryRestClient` from the
+load-balanced builder with `baseUrl("http://inventory")` — no port, because the registry
+supplied one. The same class today builds a plain `RestClient` against
+`http://inventory:8082`, an ordinary DNS name with an explicit port.
 
 **Q: This is client-side load balancing. How does it differ from a load balancer?**
 
@@ -712,7 +1001,7 @@ by ID within an application, and the default ID is derived from the hostname —
 Docker is *sometimes* unique and sometimes not, which is worse than reliably broken because
 you get intermittently wrong instance counts.
 
-*In this project:* `eureka.instance.instance-id=${spring.application.name}:${random.uuid}`.
+*In this project, while it ran:* `eureka.instance.instance-id=${spring.application.name}:${random.uuid}`.
 The symptom to memorize: you scaled to N, the registry shows fewer, and all traffic lands on
 one container.
 
@@ -731,9 +1020,9 @@ the *network* broke rather than that every instance died, and stops evicting any
 protecting you from mass-deregistering a healthy fleet during a partition. The trade is
 that a genuinely dead instance stays in the registry indefinitely.
 
-*In this project:* it's disabled, plus a 5s eviction timer, purely because this is a
-learning environment — with it on, a service you deliberately stopped lingers in the
-dashboard and the exercise stops demonstrating anything. In production you leave it on.
+*In this project, while it ran:* it was disabled, plus a 5s eviction timer, purely because
+this is a learning environment — with it on, a service you deliberately stopped lingers in
+the dashboard and the exercise stops demonstrating anything. In production you leave it on.
 
 **Q: How do you tune heartbeat and lease, and what's the trade-off?**
 
@@ -743,7 +1032,7 @@ dashboard and the exercise stops demonstrating anything. In production you leave
 traffic and a higher chance of evicting a healthy instance that had one slow moment. The
 expiration should stay a comfortable multiple of the renewal interval.
 
-*In this project:* 10s and 30s — eviction in about 30s instead of 90.
+*In this project, while it ran:* 10s and 30s — eviction in about 30s instead of 90.
 
 **Q: What happens if the Eureka server dies?**
 
@@ -760,8 +1049,8 @@ A circular lookup. The Eureka client's own HTTP transport injects whatever
 resolve the registry's own address **through the registry** — before the registry client
 exists.
 
-*In this project:* the builder is declared `@Bean(defaultCandidate = false)`, which removes
-it from by-type resolution. Eureka's transport gets the plain auto-configured builder, while
+*In this project, while it ran:* the builder was declared `@Bean(defaultCandidate = false)`,
+which removes it from by-type resolution. Eureka's transport gets the plain auto-configured builder, while
 injection points that ask by the `@LoadBalanced` qualifier still get the right one. It's a
 good example of a bug that reads as a networking problem and is actually a wiring problem.
 
@@ -781,17 +1070,30 @@ Only `UP` instances are eligible for load balancing. Health and eligibility are 
 which is also what makes graceful draining possible: mark an instance `OUT_OF_SERVICE`, let
 traffic bleed off, then stop it.
 
-**Q: Your project has both Eureka and Docker DNS round-robin. Why keep both?**
+**Q: You ran Eureka and Docker DNS round-robin side by side, then removed Eureka. What did
+that comparison actually teach you?**
 
-As a deliberate contrast. Both inventory replicas share an `inventory` network alias, so
-Docker's embedded DNS rotates A records for anyone resolving that name — free, but not
-health-aware, and the JVM's DNS caching lets a Java client pin itself to one replica and
-never move. Eureka gives the caller the actual instance list, an explicit strategy, and
-status awareness.
+For a while catalog reached inventory through the registry while sales reached the same two
+replicas through the `inventory` network alias — same targets, two mechanisms, and the
+`X-Instance-Id` header on every inventory response showing which replica each path hit.
 
-*In this project:* catalog reaches inventory through the registry, sales reaches the same
-two replicas through the Docker alias. Same targets, two mechanisms, and the `X-Instance-Id`
-header on every inventory response shows which replica each path actually hit.
+Two things came out of it. The first is that **DNS aliases are weaker than they look, but
+not in the way I expected.** I assumed the weakness was the JVM's DNS cache. The real one is
+coarser: `RestClient` resolves the name when it *opens a connection* and then keeps the
+socket alive, so balancing happens per **connection**, not per request. Six consecutive
+cross-service calls all land on the same replica. Docker's DNS genuinely does rotate — run
+`getent hosts inventory` repeatedly and the address changes — but a long-lived caller can
+sit on one replica indefinitely.
+
+The second is that **the registry wasn't fixing the failure I actually had.** Eureka gave a
+real instance list, an explicit strategy, and status awareness, which is a better answer on
+paper. But the failure mode that hurt was a replica that was *up and failing* — and Eureka
+would have kept that instance `UP` and kept sending it traffic, exactly like DNS. It reports
+existence, not readiness. So the registry came out and Resilience4j stayed, because per-caller
+timeouts and breakers are what actually stop a sick replica from taking its callers down.
+
+That is the honest lesson: I could have named the problem before adding the component, and
+the component I added didn't address it.
 
 **Q: Would you choose Eureka for a new system today?**
 
@@ -815,9 +1117,13 @@ and doesn't stop you from hammering a failing replica. It also doesn't help with
 when *no* instance is available. Adopting discovery without timeouts and circuit breakers
 mostly buys you a more dynamic way to fail.
 
+*In this project:* this is precisely why the registry was removed and Resilience4j kept —
+whichever mechanism resolves the name, **nothing in the resolution path health-checks
+anything**, so the protection has to live at the caller. See sections 8 and 9.
+
 ---
 
-## 10. Docker
+## 11. Docker
 
 **Q: Container vs virtual machine?**
 
@@ -892,7 +1198,7 @@ before bringing it back up.
 
 ---
 
-## 11. Docker Compose and load balancing
+## 12. Docker Compose and load balancing
 
 **Q: How do you load balance across service instances using Docker Compose?**
 
@@ -932,18 +1238,29 @@ holds the instance list and picks one itself with Spring Cloud LoadBalancer, cal
 `http://inventory` as a logical service ID. No extra network hop, and the client can be
 smart about retries and zone affinity.
 
-*In this project:* options 1 and 3 both run today. Two inventory replicas share an
-`inventory` network alias, so sales reaches them by DNS round-robin, while catalog resolves
-the same replicas through Eureka (section 9). HAProxy is specified in `docs/PRD.md` as the
-next phase.
+*In this project:* **only option 1 runs today.** Both inventory replicas share an `inventory`
+network alias, and every caller resolves that name through Docker's embedded DNS. Options 2
+and 3 were both built and then removed — HAProxy as an edge gateway, Eureka as a registry
+(section 10) — because at two replicas on one host neither was preventing a failure the
+system actually had, and each was a component to run and operate.
+
+The caveat worth stating with option 1 is sharper than "the JVM caches DNS": `RestClient`
+resolves the name when it **opens a connection** and then reuses the socket, so balancing is
+per-connection, not per-request. Six consecutive calls from the same caller land on the same
+replica. It is real load balancing, but far coarser than the alias suggests.
 
 **Q: Why would you use both an edge load balancer and client-side load balancing?**
 
-They answer different questions. HAProxy at the edge decides which instance an **external**
+They answer different questions. An edge balancer decides which instance an **external**
 request reaches, and gives the outside world one address instead of four ports. Client-side
-balancing decides which instance of a **peer** service an internal call goes to, using the
-registry, with no extra hop in the middle. External traffic and internal traffic are separate
-problems with separate failure modes.
+balancing decides which instance of a **peer** service an internal call goes to, with no
+extra hop in the middle. External traffic and internal traffic are separate problems with
+separate failure modes, which is why one component rarely covers both well.
+
+*In this project:* neither is running. Both were tried; at this size the honest answer was
+that four published host ports and a DNS alias were sufficient, and the interesting question
+was never *which* instance a call reaches but what the caller does when that instance is
+unwell — which is section 9.
 
 **Q: You ran `--scale inventory=2` and got "port is already allocated". Why, and how do you
 fix it?**
@@ -1053,7 +1370,7 @@ docker compose exec -T postgres psql -U postgres -d microservices < infra/postgr
 
 ---
 
-## 12. Performance and concurrency
+## 13. Performance and concurrency
 
 **Q: How would you load test a service, and what do you measure?**
 
@@ -1120,7 +1437,7 @@ one of those protections — the gap between them is where the oversell lives.
 
 ---
 
-## 13. Testing
+## 14. Testing
 
 **Q: Unit vs integration test — where do you draw the line?**
 
@@ -1158,17 +1475,23 @@ that proves the optimistic lock actually prevents an oversell.
 
 ---
 
-## 14. Questions about the project itself
+## 15. Questions about the project itself
 
 **Q: Tell me about this project.**
 
 An e-commerce system split into four Spring Boot services — catalog, inventory, sales,
-payment — over Postgres, deployed with Docker Compose. It's built in two phases on purpose:
-Phase 1 makes it work with the problems deliberately left in (hardcoded service URLs, no
-resilience, no way to scale, no visibility), and Phase 2 fixes them one at a time with
-Eureka, HAProxy, Resilience4j, Kafka, and an observability stack. The point of building it in
-that order is that each fix lands as a solution to a problem I'd already felt, rather than a
+payment — over Postgres, deployed with Docker Compose. It's built in phases on purpose:
+first make it work with the problems deliberately left in (hardcoded service URLs, no
+resilience, no way to scale, no visibility), then fix them one at a time. The point of that
+order is that each fix lands as a solution to a problem I'd already felt, rather than a
 configuration ritual copied from a tutorial.
+
+The part I'd actually lead with is that **two of those fixes were later removed**. Eureka
+went in as a service registry, then HAProxy as an edge gateway, and both came back out —
+Docker's DNS aliases already did the job at this scale, and each layer was adding a
+component to operate for a problem the system didn't have. What stayed is Resilience4j,
+because that solved something DNS genuinely cannot: a replica that is up and failing keeps
+receiving its share of traffic, since nothing in the resolution path health-checks anything.
 
 **Q: What was the hardest problem you hit?**
 
@@ -1193,10 +1516,18 @@ you get whatever undo you remembered to write.
 
 **Q: What would you do differently?**
 
-Add timeouts to the HTTP clients from day one — everything else about resilience depends on
-them, and the load test showed the system happily accumulating a 1.1 s tail with nothing
-cutting it off. I'd also write the compensating action at the same time as the forward
-action, rather than treating it as a later phase.
+Bound every outbound call from the first commit. Timeouts went in late, and everything else
+about resilience turns out to depend on them — a circuit breaker only counts calls that
+*finish*, so before they existed the system happily accumulated a 1.1s tail with nothing
+cutting it off and a breaker would have sat there CLOSED while the thread pool drained. It's
+not a tuning knob, it's the precondition.
+
+I'd also write the compensating action at the same time as the forward action rather than
+treating it as a later phase, and I'd reach for infrastructure later than I did. Eureka and
+HAProxy both went in because they're what the tutorials add next, and both came out again
+once I could articulate what problem they were solving here — which was none. The honest
+version of "what would you do differently" is: adopt a component when you can name the
+failure it prevents, not when the architecture diagram looks like it's missing one.
 
 **Q: What's the single idea from this that transfers?**
 
