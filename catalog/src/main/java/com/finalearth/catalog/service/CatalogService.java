@@ -35,11 +35,18 @@ public class CatalogService {
         Product product = productRepository.findById(id)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Product not found with id: " + id));
 
-        // Never throws for a dependency failure: InventoryClient's fallback converts one
-        // into a degraded lookup. The product half of this response is ours and is always
-        // available, so answering with it beats failing the whole request because a
-        // different service is unwell -- which is the entire argument for a fallback.
-        InventoryClient.StockLookup stock = inventoryClient.getStockByProductId(id);
+        // Never throws for a dependency failure: InventoryClient's fallbacks convert every
+        // one of them into a degraded lookup. The product half of this response is ours
+        // and is always available, so answering with it beats failing the whole request
+        // because a different service is unwell -- the entire argument for a fallback.
+        //
+        // The call returns a future because the time limiter and the thread-pool bulkhead
+        // require one; this method is still synchronous and blocks here. `await` is static
+        // on the client rather than an instance method precisely so that the join cannot
+        // be moved inside the bean, where self-invocation would bypass the proxy and strip
+        // all five patterns off the call. StockNotFoundException is unwrapped and rethrown
+        // by it, and travels on to the exception handler as a 404.
+        InventoryClient.StockLookup stock = InventoryClient.await(inventoryClient.getStockByProductId(id));
 
         if (stock.degraded()) {
             return new ProductStockDto(

@@ -2,8 +2,12 @@ package com.finalearth.sales.client;
 
 import com.finalearth.sales.exception.DependencyBusinessException;
 import com.finalearth.sales.exception.DependencyUnavailableException;
+import io.github.resilience4j.bulkhead.BulkheadFullException;
+import io.github.resilience4j.bulkhead.annotation.Bulkhead;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.ratelimiter.RequestNotPermitted;
+import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -32,9 +36,19 @@ import java.math.BigDecimal;
  *
  * <p>A fallback is equally out of the question: there is no degraded version of "money
  * moved". Returning a fake success would confirm an order that was never paid for.
- * Resilience here means failing quickly and truthfully, so the circuit breaker stands
- * alone — it stops {@code sales} from queueing threads against a dead payment provider,
- * and nothing more.
+ * Resilience here means failing quickly and truthfully, so nothing below ever returns a
+ * substitute answer — every {@code unavailable} method throws.
+ *
+ * <p><strong>The tightest limits of the three, and for a different reason.</strong> The
+ * {@code catalog} and {@code inventory} limits are engineering judgements about this
+ * system. A payment provider's limits are usually not a judgement at all: they are a
+ * number in a contract, and exceeding it gets you throttled or cut off by someone whose
+ * rate limiter you do not control. Setting your own limit just below theirs converts
+ * their enforcement — opaque, punitive, applied to whichever requests happen to arrive
+ * last — into your own, where you at least know it happened and can say so.
+ *
+ * <p>As with {@code inventory}, a rejection here is strictly better than a timeout: it is
+ * the one failure on this path that proves no charge was attempted.
  */
 @Component
 public class PaymentClient {
@@ -50,6 +64,8 @@ public class PaymentClient {
     public record PaymentRequest(Long orderId, BigDecimal amount, String method) {}
 
     @CircuitBreaker(name = "payment", fallbackMethod = "unavailable")
+    @RateLimiter(name = "payment")
+    @Bulkhead(name = "payment")
     public void processPayment(Long orderId, BigDecimal amount, String method) {
         try {
             restClient.post()
@@ -81,5 +97,26 @@ public class PaymentClient {
                         + "charge state on the provider is UNKNOWN, do not assume it did not happen",
                 orderId, e.getClass().getSimpleName());
         throw new DependencyUnavailableException("payment", false, e.getClass().getSimpleName());
+    }
+
+    /**
+     * Refused by our own rate limiter before the request was sent. Read the log line next
+     * to the one above: this is the difference between "no charge was made" and "we do not
+     * know whether a charge was made", and it is the whole reason a limit that rejects
+     * early is preferable to a timeout that rejects late.
+     */
+    @SuppressWarnings("unused") // resolved by name by Resilience4j
+    private void unavailable(Long orderId, BigDecimal amount, String method, RequestNotPermitted e) {
+        log.warn("[r4j] FALLBACK payment order={} reason=rate-limited -- self-imposed limit, "
+                        + "NO charge was attempted", orderId);
+        throw new DependencyUnavailableException("payment", false, "rate limited by sales");
+    }
+
+    @SuppressWarnings("unused") // resolved by name by Resilience4j
+    private void unavailable(Long orderId, BigDecimal amount, String method, BulkheadFullException e) {
+        log.warn("[r4j] FALLBACK payment order={} reason=bulkhead-full detail=\"{}\" -- "
+                        + "concurrency cap reached, NO charge was attempted",
+                orderId, e.getMessage());
+        throw new DependencyUnavailableException("payment", false, "concurrency limit reached in sales");
     }
 }

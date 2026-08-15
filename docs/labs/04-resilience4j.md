@@ -71,6 +71,10 @@ Retry {                        ← outermost
 }
 ```
 
+> The `catalog` → `inventory` call now stacks five aspects rather than two. The two
+> consequences below still hold unchanged; the other three are in
+> [Lab 05 §2](05-resilience-patterns.md#2-how-they-compose).
+
 Two consequences follow, and both surprise people:
 
 - **Every retry attempt is counted separately by the breaker.** One user request
@@ -145,9 +149,11 @@ database read, and a timeout set below a dependency's normal latency is not
 resilience — it is a self-inflicted outage that also risks abandoning work the
 callee actually completed.
 
-> `@TimeLimiter` does **not** apply here. It only works on methods returning
-> `CompletableFuture`; these are blocking calls, so the request factory is the
-> right place to bound them.
+> **Updated in [Lab 05](05-resilience-patterns.md).** `catalog` → `inventory` has
+> since gained a `@TimeLimiter` as well, which required returning
+> `CompletableFuture` from that one method. The socket timeouts remain the
+> load-bearing bound everywhere — a time limiter cancels the *waiting*, not the
+> work — and the three `sales` paths still rely on the request factory alone.
 
 ### The policy matrix
 
@@ -160,6 +166,10 @@ way up** — each dependency gets the policy its semantics allow.
 | `sales` → `catalog` | GET product | **3 attempts** | yes | **none → 503** | Idempotent, but there is no honest guess at a price |
 | `sales` → `inventory` | POST reserve | **none** | yes | **none → 503** | Not idempotent — a retry can double-reserve |
 | `sales` → `payment` | POST charge | **none** | yes | **none → 503** | Not idempotent — a retry can double-charge |
+
+> Every path has since also gained a **rate limiter** and a **bulkhead**, and the
+> `catalog` → `inventory` read a **time limiter**. See the full matrix in
+> [Lab 05 §3](05-resilience-patterns.md#3-what-is-configured-where).
 
 **Why the write paths do not retry.** A read timeout means the *response* was lost,
 not the *request*. The reservation may already be committed on the other side. Retry
@@ -373,8 +383,8 @@ the lesson.
   order stays at `STOCK_RESERVED` rather than being marked `PAYMENT_FAILED` — that
   status would assert the charge did not happen, which nobody knows. Honest, but it
   needs reconciliation to finish the job.
-- **No bulkheads.** A breaker per dependency gives partial isolation, but one slow
-  dependency can still occupy every thread until its timeout expires.
+- ~~**No bulkheads.**~~ Added in [Lab 05](05-resilience-patterns.md), along with
+  rate limiters and a time limiter.
 - **The breakers are per instance, not shared.** Each `catalog` replica learns
   independently that `inventory` is down.
 - **No metrics backend.** `/actuator/circuitbreakerevents` keeps a small in-memory
@@ -382,5 +392,9 @@ the lesson.
 
 ---
 
-**Next:** the failure modes Resilience4j deliberately does not solve — compensating
-transactions and the saga pattern.
+**Next:** [Lab 05 — The Five Patterns, and the Order They Run In](05-resilience-patterns.md)
+— rate limiters, bulkheads and time limiters, and what changes when all five are
+stacked on one call.
+
+**After that:** the failure modes Resilience4j deliberately does not solve —
+compensating transactions and the saga pattern.

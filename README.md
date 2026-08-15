@@ -45,14 +45,24 @@ health-checks anything. What stops that from taking callers down with it is
 | | |
 |---|---|
 | Timeouts | Every outbound call is bounded (1s connect, 2s read; 5s for payment) |
+| Time limiter | A single 1.5s wall-clock deadline on `catalog` → `inventory` |
 | Retry | Only on idempotent reads — `GET` product and stock |
 | Circuit breaker | One per dependency, opening on failure rate **or** slow-call rate |
+| Rate limiter | One per dependency, tightening toward the write paths (100/s → 25/s) |
+| Bulkhead | One per dependency, capping how many threads a single callee can occupy |
 | Fallback | Only where an honest degraded answer exists |
 
-The distinction that governs all of it: a 404, a 409 or a declined card are
-**successful conversations with healthy services**. They are failures of the
-order, not of the system, and they are configured never to trip a breaker.
-See [Lab 04](docs/labs/04-resilience4j.md).
+Two distinctions govern all of it. First, a 404, a 409 or a declined card are
+**successful conversations with healthy services** — failures of the order, not
+of the system, configured never to trip a breaker. Second, a rate-limiter or
+bulkhead rejection is a call *this* service refused to make, so it is evidence
+about us and not about the dependency; it is ignored by the breaker for the same
+reason, and left unlisted it would quietly count as a **success** and prop up the
+health metrics exactly when the system is saturated.
+
+See [Lab 04](docs/labs/04-resilience4j.md) for retries and breakers, and
+[Lab 05](docs/labs/05-resilience-patterns.md) for all five patterns and the fixed
+order they compose in.
 
 > This project previously ran Netflix Eureka, and then HAProxy as an edge
 > gateway. Both were removed. See [Lab 02](docs/labs/02-service-discovery.md)
@@ -274,13 +284,18 @@ the change, verification steps, and deliberate breakage with expected symptoms.
 | **01 — First run** | Referenced by the other labs but not yet written |
 | [**02 — Service Discovery with Eureka**](docs/labs/02-service-discovery.md) | **Archived.** Does not match the running stack; kept for the registry model and its AP/staleness trade-offs |
 | [**03 — Edge Gateway and Load Balancing with HAProxy**](docs/labs/03-haproxy-load-balancing.md) | **Archived.** The gateway has been removed; kept for path routing, `server-template` and DNS re-resolution |
-| [**04 — Retries, Circuit Breakers and Fallbacks**](docs/labs/04-resilience4j.md) | **Current.** Describes the system as it stands |
+| [**04 — Retries, Circuit Breakers and Fallbacks**](docs/labs/04-resilience4j.md) | **Current.** The three foundational patterns, in depth |
+| [**05 — The Five Patterns, and the Order They Run In**](docs/labs/05-resilience-patterns.md) | **Current.** Adds rate limiters, bulkheads and time limiters |
 
 Labs 02 and 03 describe layers this project has since taken back out — read them
-for the model, not as a description of what runs today. **Lab 04 is the current
-one**, and covers why timeouts must come before circuit breakers, why write paths
-are not retried, and five break-it-yourself exercises including a circuit that
-opens without a single error.
+for the model, not as a description of what runs today.
+
+**Labs 04 and 05 describe what runs now.** Lab 04 covers why timeouts must come
+before circuit breakers, why write paths are not retried, and a circuit that opens
+without a single error. Lab 05 covers the difference between a rate limiter and a
+bulkhead, the three separate things called "timeout", why a time limiter cancels
+the waiting but not the work, and the fixed aspect order that decides which layer
+sees a failure first.
 
 ---
 
