@@ -1,12 +1,11 @@
 services:
   postgres:
     image: postgres:17-alpine
+    container_name: postgres
     environment:
       POSTGRES_DB: microservices
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -20,22 +19,115 @@ services:
 
   pgadmin:
     image: dpage/pgadmin4:9.13
+    container_name: pgadmin
+    ports:
+      - "5050:80"
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
       PGADMIN_CONFIG_SERVER_MODE: "False"
-    ports:
-      - "5050:80"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/misc/ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------------------
+  # Kafka -- single broker, KRaft mode (no ZooKeeper)
+  # ---------------------------------------------------------------------------
+  # KRaft folds the metadata quorum into Kafka itself: this one container is both
+  # `broker` and `controller`, which is why it needs two internal listeners and a
+  # quorum voter list that points at itself.
+  #
+  # Three listeners, because they answer three different questions:
+  #   PLAINTEXT  :9092  -- how services inside the `backend` network reach it
+  #   CONTROLLER :9093  -- the KRaft metadata quorum, never spoken by a client
+  #   EXTERNAL  :29092  -- how YOU reach it from the host (kafka-console-* etc.)
+  #
+  # The advertised addresses matter more than the bound ones. A client's first
+  # connection is only a metadata lookup; the broker replies with the address to
+  # actually use, and the client reconnects there. Advertise `kafka:9092` to the
+  # network and `localhost:29092` to the host, or one of the two sides connects
+  # successfully and then fails on every subsequent produce.
+  #
+  # Host port 29092, not 9092: `inventory1` and `inventory2` already publish 9092
+  # and 9093. Kafka's own 9092/9093 are container-internal and collide with
+  # nothing; only the published port had to move.
+  kafka:
+    image: apache/kafka:4.3.1
+    container_name: kafka
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      # One broker means one replica of everything. These defaults are 3, and
+      # leaving them there makes every internal topic fail to create.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      # Default is 3000ms, which makes every consumer group wait three seconds
+      # for members that are not coming. Zero is a development-only setting.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created explicitly by KafkaAdmin in each service so partition
+      # counts are deliberate. Auto-creation would silently give them one
+      # partition each and quietly break the consumer-group scaling in Lab 06.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      CLUSTER_ID: kafka-microservices-lab-0
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks:
+      - backend
+
+  # Read-only window on the broker: topics, partitions, messages, consumer groups
+  # and -- the one worth knowing -- per-group lag.
+  kafka-ui:
+    image: kafbat/kafka-ui:v1.5.0
+    container_name: kafka-ui
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: microservices
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     networks:
       - backend
 
   catalog:
     build: ./catalog
+    container_name: catalog
+    ports:
+      - "8081:8081"
     develop:
       watch:
         - action: rebuild
@@ -47,9 +139,9 @@ services:
       DB_HOST: postgres
       DB_USER: catalog_user
       DB_PASSWORD: catalog_pass
+      # inventory1/inventory2 share the `inventory` network alias, so this one
+      # name resolves to both replicas' A records.
       INVENTORY_URL: http://inventory:8082
-    ports:
-      - "8081:8081"
     depends_on:
       postgres:
         condition: service_healthy
@@ -62,8 +154,14 @@ services:
     networks:
       - backend
 
-  inventory:
+  # Each replica publishes its own host port so a single instance can be
+  # addressed directly -- which is how you take one out of service, or hit one
+  # while leaving the other healthy, when exercising a circuit breaker.
+  inventory1:
     build: ./inventory
+    container_name: inventory1
+    ports:
+      - "9092:8082"
     develop:
       watch:
         - action: rebuild
@@ -75,10 +173,12 @@ services:
       DB_HOST: postgres
       DB_USER: inventory_user
       DB_PASSWORD: inventory_pass
-    ports:
-      - "8082:8082"
+      LAB_FAULT_INJECTION: "true"
+      KAFKA_BOOTSTRAP: kafka:9092
     depends_on:
       postgres:
+        condition: service_healthy
+      kafka:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8082/actuator/health"]
@@ -87,10 +187,49 @@ services:
       retries: 5
       start_period: 40s
     networks:
-      - backend
+      backend:
+        aliases:
+          - inventory
+
+  inventory2:
+    build: ./inventory
+    container_name: inventory2
+    ports:
+      - "9093:8082"
+    develop:
+      watch:
+        - action: rebuild
+          path: ./inventory/src
+        - action: rebuild
+          path: ./inventory/pom.xml
+    environment:
+      SERVER_PORT: 8082
+      DB_HOST: postgres
+      DB_USER: inventory_user
+      DB_PASSWORD: inventory_pass
+      LAB_FAULT_INJECTION: "true"
+      KAFKA_BOOTSTRAP: kafka:9092
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    networks:
+      backend:
+        aliases:
+          - inventory
 
   sales:
     build: ./sales
+    container_name: sales
+    ports:
+      - "8083:8083"
     develop:
       watch:
         - action: rebuild
@@ -102,19 +241,18 @@ services:
       DB_HOST: postgres
       DB_USER: sales_user
       DB_PASSWORD: sales_pass
+      # catalog is still called over HTTP: pricing is a read with a definite
+      # answer, and the order cannot be priced without it. inventory and payment
+      # are no longer addressed directly at all -- sales reaches them by
+      # publishing an event, so it needs the broker's address instead of theirs.
       CATALOG_URL: http://catalog:8081
-      INVENTORY_URL: http://inventory:8082
-      PAYMENT_URL: http://payment:8084
-    ports:
-      - "8083:8083"
+      KAFKA_BOOTSTRAP: kafka:9092
     depends_on:
       postgres:
         condition: service_healthy
       catalog:
         condition: service_healthy
-      inventory:
-        condition: service_healthy
-      payment:
+      kafka:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8083/actuator/health"]
@@ -127,6 +265,7 @@ services:
 
   payment:
     build: ./payment
+    container_name: payment
     develop:
       watch:
         - action: rebuild
@@ -138,10 +277,11 @@ services:
       DB_HOST: postgres
       DB_USER: payment_user
       DB_PASSWORD: payment_pass
-    ports:
-      - "8084:8084"
+      KAFKA_BOOTSTRAP: kafka:9092
     depends_on:
       postgres:
+        condition: service_healthy
+      kafka:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8084/actuator/health"]
@@ -155,6 +295,7 @@ services:
 volumes:
   postgres_data:
   pgadmin_data:
+  kafka_data:
 
 networks:
   backend:

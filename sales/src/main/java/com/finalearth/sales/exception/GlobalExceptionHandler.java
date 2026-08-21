@@ -14,6 +14,36 @@ import java.util.stream.Collectors;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    /**
+     * A dependency answered "no". Its status is passed straight through — a 404 stays a
+     * 404 and a declined card stays a 402, because the caller's problem is the same one
+     * the dependency described.
+     */
+    @ExceptionHandler(DependencyBusinessException.class)
+    public ResponseEntity<ProblemDetail> handleDependencyBusiness(DependencyBusinessException ex) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        pd.setType(URI.create("about:blank"));
+        return ResponseEntity.status(ex.getStatus()).body(pd);
+    }
+
+    /**
+     * A dependency could not be reached. Always 503, and always with a
+     * {@code Retry-After} — the client is being told to come back, not that its request
+     * was wrong. {@code circuitOpen} is surfaced so the caller can see the difference
+     * between "we tried and failed" and "we have stopped trying for now".
+     */
+    @ExceptionHandler(DependencyUnavailableException.class)
+    public ResponseEntity<ProblemDetail> handleDependencyUnavailable(DependencyUnavailableException ex) {
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage());
+        pd.setTitle("Dependency unavailable");
+        pd.setType(URI.create("about:blank"));
+        pd.setProperty("dependency", ex.getDependency());
+        pd.setProperty("circuitOpen", ex.isCircuitOpen());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header("Retry-After", "10")
+                .body(pd);
+    }
+
     @ExceptionHandler(ResponseStatusException.class)
     public ResponseEntity<ProblemDetail> handleResponseStatus(ResponseStatusException ex) {
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(ex.getStatusCode(), ex.getReason());

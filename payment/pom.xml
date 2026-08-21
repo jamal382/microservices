@@ -49,6 +49,17 @@
 			<scope>runtime</scope>
 		</dependency>
 
+		<!-- The starter, not org.springframework.kafka:spring-kafka on its own. The raw
+		     artifact gives you the KafkaTemplate class but none of Boot's wiring: Boot 4
+		     split auto-configuration into per-technology modules, and the one that reads
+		     spring.kafka.* and defines the KafkaTemplate bean ships in spring-boot-kafka,
+		     which only this starter pulls in. Without it the app compiles cleanly and then
+		     fails at startup with "No qualifying bean of type KafkaTemplate". -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-kafka</artifactId>
+		</dependency>
+
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-test</artifactId>
