@@ -18,7 +18,8 @@ codebase, which is what turns a memorized definition into a credible answer.
 12. [Docker Compose and load balancing](#12-docker-compose-and-load-balancing)
 13. [Performance and concurrency](#13-performance-and-concurrency)
 14. [Testing](#14-testing)
-15. [Questions about the project itself](#15-questions-about-the-project-itself)
+15. [Apache Kafka, sagas and the outbox](#15-apache-kafka-sagas-and-the-outbox)
+16. [Questions about the project itself](#16-questions-about-the-project-itself)
 
 ---
 
@@ -1475,7 +1476,300 @@ that proves the optimistic lock actually prevents an oversell.
 
 ---
 
-## 15. Questions about the project itself
+## 15. Apache Kafka, sagas and the outbox
+
+**Q: Why use a message broker at all when the services can just call each other?**
+
+Because a synchronous call conflates two different failures. When `sales` called `payment`
+over HTTP and the call timed out, the caller could not tell "the charge did not happen" from
+"I do not know whether the charge happened" — both arrive as the same exception. It could not
+retry (might double-charge) and could not mark the order failed (might have succeeded). A
+broker removes the ambiguity instead of handling it: the instruction is a durable record, the
+outcome comes back as its own durable record, and an outcome that is slow is no longer an
+outcome that is unknown.
+
+**In this project** that exact scenario was a documented known limitation for the life of the
+project — orders stranded at `STOCK_RESERVED` waiting for a human. Lab 06 closed it. Stop the
+`payment` container, place an order, start it again: the order completes on its own.
+
+---
+
+**Q: What is the dual-write problem?**
+
+Any time you change your database *and* publish a message, you are writing to two systems with
+no transaction spanning them. Either order can fail halfway:
+
+- Commit the DB, crash before publishing → the order exists and nobody downstream hears.
+- Publish, crash before committing → everyone acts on an order that does not exist.
+
+There is no ordering of those two calls that is safe. It is not a problem you solve by being
+careful about the sequence.
+
+**In this project** the fix is to stop doing two writes — see the outbox below.
+
+---
+
+**Q: Explain the transactional outbox pattern.**
+
+The event is inserted into an `outbox` table in your own database, **in the same transaction as
+the business change**. One database, one commit, all-or-nothing. A separate relay then reads
+committed rows and publishes them to the broker, which is a job that can safely be retried
+because the intent is already durable.
+
+**In this project** all three saga services have an `outbox` table. `EventPublisher` only ever
+does `outbox.save(...)` — it has no `KafkaTemplate` at all, deliberately, so nothing on a
+business path can publish directly. `OutboxRelay` is the only component that talks to Kafka.
+
+---
+
+**Q: Why does the relay hold a database lock across a network call? Isn't that a mistake?**
+
+Normally yes; here it is the mechanism. The relay does `SELECT ... FOR UPDATE SKIP LOCKED`,
+publishes, and only then sets `published_at` — all in one transaction. If it dies mid-publish
+the transaction rolls back, the row unlocks still marked unpublished, and the next poll retries
+it. Marking rows published *before* the acknowledgement would turn every broker hiccup into a
+permanently lost event.
+
+`SKIP LOCKED` matters because there are as many relays as replicas — two, for `inventory`. A
+plain `SELECT` would hand both the same rows and publish everything twice.
+
+---
+
+**Q: What delivery guarantee does Kafka give you?**
+
+**At least once**, in practice. At-most-once and exactly-once are both configurable in a narrow
+sense, but the useful default is at-least-once: a consumer that does its work and dies before
+committing its offset will be handed the same record again on restart, as will any consumer in a
+group after a rebalance.
+
+"Exactly-once *delivery*" is not achievable across a network. "Exactly-once *processing*" is —
+by making the consumer idempotent.
+
+---
+
+**Q: So how do you make a consumer idempotent?**
+
+An **inbox**: a `processed_events` table keyed on a producer-assigned event id. Check it, do the
+work, insert the row — all in the same transaction as the business change. A redelivered event
+finds its own row and does nothing.
+
+The offset commit is necessarily *outside* that transaction (offsets live in Kafka, rows live in
+Postgres), so a crash between the two replays the record — into a consumer that now no-ops.
+
+**In this project** the correctness does not depend on the `SELECT` winning a race: two
+concurrent deliveries both see an empty inbox, both insert, and the primary key lets exactly one
+through — the loser's business change rolls back with it. `payment` additionally checks for an
+existing payment row, because only one of those two guards has to fail for a customer to be
+charged twice.
+
+---
+
+**Q: `enable.idempotence=true` is set on the producer. Why is the inbox still needed?**
+
+Producer idempotence de-duplicates the producer's **own internal retries** by sequencing records
+per partition. It does not survive a process restart — a new producer session gets a new producer
+id — and it says nothing about a consumer reprocessing a record it already handled. Different
+problem, different layer.
+
+---
+
+**Q: What is a saga?**
+
+A way to get a business transaction across services when you cannot have a distributed one. The
+work is split into local transactions, each publishing an event that triggers the next. There is
+no rollback, because the earlier steps committed long ago in other databases — so failure is
+handled by **compensating actions**: new transactions that do the opposite.
+
+**In this project**: place order → reserve stock → charge. If the charge is declined, `sales`
+emits `order.cancelled`, `inventory` releases the units and confirms with `stock.released`, and
+the order reaches `CANCELLED`. The compensation is itself a recorded stock movement — the
+`RESERVE` rows stay and `RELEASE` rows are added beside them, because compensation is a new
+business fact, not an erasure.
+
+---
+
+**Q: Choreography or orchestration?**
+
+Choreography means no coordinator: each service reacts to events and publishes its own outcome.
+Orchestration means one component holds the saga state and issues each step.
+
+| | Choreography | Orchestration |
+|---|---|---|
+| Coupling | Services know topics | Everyone knows the orchestrator |
+| Adding a consumer | Just subscribe | Change the orchestrator |
+| Seeing the whole flow | Nowhere in code | One class |
+
+**In this project** it is choreography, and the honest cost is that **no file describes the
+order flow** — the diagram lives in the README and can drift from what runs. That was an
+acceptable trade because the flow is short and linear. For a saga with a dozen branches I would
+choose orchestration for exactly the reason listed in that last row.
+
+---
+
+**Q: What decides which partition a message goes to, and why does it matter?**
+
+The message key, hashed. Kafka guarantees ordering **within a partition**, not across a topic —
+so two events only stay ordered relative to each other if they share a key.
+
+**In this project** every saga event is keyed by `orderId`. That guarantees `stock.reserved` for
+order 42 cannot overtake a later `order.cancelled` for order 42, while leaving orders 41 and 43
+free to be handled in parallel on other partitions. Ordering where you need it, concurrency
+everywhere else.
+
+---
+
+**Q: What is a consumer group, and how does it relate to scaling?**
+
+Consumers sharing a `group-id` are one logical consumer: each partition is assigned to exactly
+one member, so each record is processed once by the group. Different groups on the same topic
+each get every record independently.
+
+**In this project** both `inventory` replicas share `group-id=inventory`, so they split
+`order.placed` 2/1 across three partitions — no order is reserved twice, and no coordination
+code makes that true. Meanwhile `stock.reserved` is read by *two* groups: `sales` (to advance
+the order) and `payment` (to charge). Neither knows the other exists.
+
+**The ceiling is hard**: a group can never usefully have more members than the topic has
+partitions. A fourth `inventory` replica would join and receive nothing. And giving the two
+replicas *different* group ids is the single most dangerous line in the config — every order
+would be reserved twice, silently, with no error anywhere.
+
+---
+
+**Q: What is a poison pill, and what do you do about it?**
+
+A record a consumer can never process. Without a policy it is retried forever and the offset
+never advances — the partition stops, and every well-formed message queued behind it stops too,
+on a service that reports itself perfectly healthy.
+
+The fix is a `DefaultErrorHandler` with a bounded backoff and a `DeadLetterPublishingRecoverer`:
+retry a few times for the transient case, then move the record to a dead-letter topic so the
+partition keeps flowing.
+
+**In this project** the DLT belongs to the **consumer**, not the topic — `sales.dlt`,
+`inventory.dlt`, `payment.dlt`. `stock.reserved` is read by two groups doing different jobs, so a
+record `payment` chokes on may be fine for `sales`; a single `stock.reserved.DLT` would not say
+which side failed. Malformed payloads are registered as non-retryable, because JSON that will not
+parse now will not parse in a second.
+
+---
+
+**Q: Why serialize as plain strings instead of using Spring's `JsonSerializer`?**
+
+`JsonSerializer` stamps the producer's fully-qualified Java class name into a `__TypeId__` header
+and has the consumer instantiate that class by name. That makes
+`com.finalearth.sales.event.OrderPlacedEvent` part of the **wire contract** — rename a package in
+the producer and you break a consumer that was never recompiled.
+
+**In this project** each service declares its own copy of each event record, naming only the
+fields it reads. `inventory`'s `OrderPlacedEvent` omits `orderNumber` and `customerId` entirely
+and ignores them without any configuration, which is what lets the producer add fields without a
+coordinated release. The JSON is the contract; the Java class is an implementation detail.
+
+---
+
+**Q: Kafka events carry data the immediate consumer doesn't need. Isn't that wrong?**
+
+It looks wrong and it is the defining shape of choreography. With no orchestrator holding the
+order in memory, each event must carry what the *rest* of the chain will need.
+
+**In this project** `order.placed` carries `totalAmount` and `paymentMethod`, which `inventory`
+never reads — it copies them onto `stock.reserved` so `payment` can charge without calling back
+to `sales`. Having `payment` fetch them over HTTP would put a synchronous dependency in the
+middle of an asynchronous flow and reintroduce every failure mode the design removed.
+
+---
+
+**Q: Does Kafka replace circuit breakers and retries?**
+
+No — it removes the situation they exist for, on the calls it covers.
+
+Circuit breakers, bulkheads, rate limiters and retries all answer one question: *what does a
+caller do when the callee is unreachable right now?* Publishing to a durable log never raises it.
+The broker holds the event until the consumer is healthy, and a consumer that is down is a
+consumer with **lag**, not a failed call.
+
+**In this project** `sales` lost its `inventory` and `payment` breakers, bulkheads, rate limiters
+and fallbacks — deleted, not disabled — while keeping the full stack on `catalog`, which is still
+a synchronous request/response call. The lesson is not "Kafka replaces Resilience4j"; it is that
+those patterns are for synchronous calls, and the most effective way to survive a synchronous
+call is sometimes to not make one.
+
+---
+
+**Q: Why does the reservation method return an outcome instead of throwing?**
+
+Because the rejection has to be *published*, and publishing means writing a row to the outbox in
+the same transaction. Throwing marks that transaction rollback-only, so the outbox row would be
+discarded with the failed reservation — the listener would retry, fail identically, dead-letter a
+record that was never malformed, and `sales` would wait forever for an answer that could not be
+sent.
+
+**In this project** that is why `reserveForOrder` returns a `ReservationOutcome` and
+`chargeForOrder` returns a `PaymentOutcome`, while the HTTP paths still throw. Every saga step
+must report back — and an event you cannot commit is an event you cannot send.
+
+---
+
+**Q: Why does `POST /api/orders` return 202 instead of 201?**
+
+`201 Created` promises the resource exists in its final form. The order exists; its outcome does
+not — stock is unchecked and no card has been charged. Returning 201 would tell the caller the
+order succeeded at the exact moment nobody knows whether it will.
+
+**In this project** the caller gets a durable order id, a `Location` header and the guarantee
+that the saga will run, then polls `GET /api/orders/{id}` for a terminal state. That is the real
+cost of the async design and it is a genuine downside: the customer no longer gets an immediate
+yes or no.
+
+---
+
+**Q: What is KRaft?**
+
+Kafka's own metadata quorum, replacing ZooKeeper — removed entirely as of Kafka 4.x. One less
+system to run, configure and reason about.
+
+**In this project** the single `kafka` container is both `broker` and `controller`, which is why
+it binds three listeners: `PLAINTEXT:9092` for services on the Docker network, `CONTROLLER:9093`
+for the quorum, and `EXTERNAL:29092` for the host. The advertised addresses matter more than the
+bound ones — a client's first connection is only a metadata lookup, and the broker replies with
+the address to actually use.
+
+---
+
+**Q: How would you debug an order that is stuck?**
+
+Read its status, then find the consumer that has not answered:
+
+```bash
+curl -s localhost:8083/api/orders/42                    # which step is it on?
+docker compose logs sales inventory1 inventory2 payment | grep 'order=42'
+docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 --describe --all-groups     # who has lag?
+psql -c "SELECT count(*) FROM sales.outbox WHERE published_at IS NULL;"
+```
+
+The status names the missing step: `PENDING` means `inventory` has not consumed;
+`STOCK_RESERVED` means `payment` has not answered; `PAYMENT_FAILED` means compensation is still
+in flight. **Lag is the number to watch** — it is the only metric here that shows the system
+falling behind *before* anything actually fails.
+
+---
+
+**Q: What's still wrong with this design?**
+
+- The relay polls every 500ms rather than tailing the WAL with Debezium — a latency floor on
+  every hop.
+- Nothing prunes `processed_events`; it grows forever.
+- Dead-letter topics are a dumping ground — nothing routes, alerts on or replays them.
+- No schema registry, so "add fields, never remove them" is enforced by review.
+- One broker with replication factor 1, which makes `acks=all` a formality.
+- No saga timeouts: if a consumer never answers, the order waits forever. A real saga runs a
+  per-step deadline that triggers compensation.
+
+---
+
+## 16. Questions about the project itself
 
 **Q: Tell me about this project.**
 
@@ -1486,12 +1780,23 @@ resilience, no way to scale, no visibility), then fix them one at a time. The po
 order is that each fix lands as a solution to a problem I'd already felt, rather than a
 configuration ritual copied from a tutorial.
 
-The part I'd actually lead with is that **two of those fixes were later removed**. Eureka
-went in as a service registry, then HAProxy as an edge gateway, and both came back out —
-Docker's DNS aliases already did the job at this scale, and each layer was adding a
+The part I'd actually lead with is that **several of those fixes were later removed**.
+Eureka went in as a service registry, then HAProxy as an edge gateway, and both came back
+out — Docker's DNS aliases already did the job at this scale, and each layer was adding a
 component to operate for a problem the system didn't have. What stayed is Resilience4j,
 because that solved something DNS genuinely cannot: a replica that is up and failing keeps
 receiving its share of traffic, since nothing in the resolution path health-checks anything.
+
+Then the order path was converted to an **event-driven saga over Kafka**, and that removed
+things too — the circuit breakers, bulkheads and rate limiters `sales` had pointed at
+`inventory` and `payment` were deleted along with the HTTP clients. Every one of those
+patterns answers "what does a caller do when the callee is unreachable right now?", and
+publishing to a durable log never raises the question. `catalog` kept its full stack because
+pricing is still a synchronous read.
+
+So the system now uses both styles deliberately, and the interesting part is the boundary:
+reads with a definite answer stay synchronous and get Resilience4j; state changes travel as
+events with a transactional outbox on the way out and an inbox on the way in.
 
 **Q: What was the hardest problem you hit?**
 
@@ -1506,13 +1811,32 @@ That database connections never moved under load — flat at 41 from idle to 1,0
 users. I'd assumed load propagated to the database; it doesn't. The pool is a gate and the
 queue forms in front of it, which changes where you look when latency climbs.
 
-**Q: What's the biggest weakness in it right now?**
+**Q: What was the biggest weakness, and how did you fix it?**
 
-A declined payment doesn't release the reserved stock. Sales marks the order
-`PAYMENT_FAILED` and stops, because inventory has no release endpoint yet — so every decline
-leaks a reservation. It's the missing compensating action in the saga, and it's a good
-illustration of the real lesson: once you cross a service boundary you don't get a rollback,
-you get whatever undo you remembered to write.
+For most of the project's life a declined payment didn't release the reserved stock — sales
+marked the order `PAYMENT_FAILED` and stopped, so every decline leaked a reservation. Worse,
+if `payment` was simply *unreachable*, the order was abandoned at `STOCK_RESERVED`, because
+marking it failed would assert no money moved and nobody actually knew that.
+
+Both were the same root cause: a synchronous call can't distinguish "it didn't happen" from
+"I don't know whether it happened". The saga fixed it by making the outcome a durable event
+instead of a return value — `payment` publishes `payment.failed`, `sales` emits
+`order.cancelled`, `inventory` releases the units and confirms with `stock.released`, and the
+order reaches `CANCELLED`. The demo I'd show is stopping the payment container mid-order:
+it parks at `STOCK_RESERVED` with consumer lag of 1, and completes on its own when the
+container comes back.
+
+The lesson generalises: once you cross a service boundary you don't get a rollback, you get
+whatever undo you remembered to write.
+
+**Q: What's the biggest weakness now?**
+
+Nothing watches the dead-letter topics, and there are no saga timeouts. If a consumer throws
+four times on a record it goes to a `*.dlt` topic and the saga simply stops — an order that
+will never be reserved, with no alert and no timeout to trigger compensation. The system got
+much better at *not losing* work and no better at *telling anyone* that work is stuck. The
+honest summary is that I replaced a loud failure with a quiet one, and the quiet one now
+needs monitoring to be safe.
 
 **Q: What would you do differently?**
 

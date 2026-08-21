@@ -39,22 +39,6 @@ public class RestClientConfig {
         return build(url, connectTimeoutMs, readTimeoutMs);
     }
 
-    @Bean
-    public RestClient inventoryRestClient(
-            @Value("${inventory.service.url}") String url,
-            @Value("${clients.connect-timeout-ms:1000}") long connectTimeoutMs,
-            @Value("${clients.read-timeout-ms:2000}") long readTimeoutMs) {
-        return build(url, connectTimeoutMs, readTimeoutMs);
-    }
-
-    @Bean
-    public RestClient paymentRestClient(
-            @Value("${payment.service.url}") String url,
-            @Value("${clients.connect-timeout-ms:1000}") long connectTimeoutMs,
-            @Value("${clients.payment-read-timeout-ms:5000}") long readTimeoutMs) {
-        return build(url, connectTimeoutMs, readTimeoutMs);
-    }
-
     private static RestClient build(String url, long connectTimeoutMs, long readTimeoutMs) {
         return RestClient.builder()
                 .baseUrl(url)

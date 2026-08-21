@@ -18,7 +18,7 @@
 #   slow                inventory stalls 1500ms  -> circuit opens on SLOW calls alone
 #   recover             drive it open, then watch OPEN -> HALF_OPEN -> CLOSED
 #   business            a real 404 -> proves business answers do NOT trip anything
-#   order               the sales order flow: why writes are not retried
+#   order               the Kafka order saga: a declined payment and its compensation
 #
 set -uo pipefail
 
@@ -72,6 +72,11 @@ reset_breaker() { # reset_breaker <base> <name>
 # docker compose streams logs asynchronously, so a line written microseconds ago
 # is not necessarily readable yet. Without this the narrative comes back empty.
 settle() { sleep "${1:-2}"; }
+
+order_status() { # order_status <orderId>
+  curl -s "$SALES/api/orders/$1" \
+    | python3 -c "import json,sys;print(json.load(sys.stdin)['status'])" 2>/dev/null || echo "?"
+}
 
 cb_state() { # cb_state <base> <name>
   curl -s "$1/actuator/circuitbreakers" \
@@ -232,51 +237,73 @@ scenario_business() {
 }
 
 scenario_order() {
-  local rid="demo-order-$RANDOM"
   step "SETUP"
-  reset_breaker "$CATALOG" inventory
-  note "The order flow touches catalog, inventory and payment in sequence."
-  note "Each has its OWN circuit breaker, and deliberately different policies."
-  echo "  sales breakers: $(curl -s "$SALES/actuator/circuitbreakers" | python3 -c "
-import json,sys
-for k,v in json.load(sys.stdin)['circuitBreakers'].items(): print(f'{k}={v[\"state\"]}', end='  ')" 2>/dev/null)"
+  note "The order flow is a choreographed Kafka saga. sales calls catalog for prices,"
+  note "then publishes -- inventory and payment are never addressed directly."
+  note "This scenario watches an order fail at payment and get compensated."
 
-  step "A healthy order"
-  curl -s -X POST "$SALES/api/orders" -H 'Content-Type: application/json' \
-    -d '{"customerId":1,"items":[{"productId":5,"quantity":1}],"paymentMethod":"CARD"}' \
-    | python3 -m json.tool 2>/dev/null | sed 's/^/    /' | head -12
-
-  step "Now inventory fails -- কী failure হলো?"
-  fault ERROR
-  echo "  Request:  POST $SALES/api/orders   [X-Request-Id: $rid]"
-  local body
-  body=$(curl -s -H "X-Request-Id: $rid" -X POST "$SALES/api/orders" -H 'Content-Type: application/json' \
+  step "1. A healthy order -- note the 202"
+  local body code
+  body=$(curl -s -X POST "$SALES/api/orders" -H 'Content-Type: application/json' \
     -d '{"customerId":1,"items":[{"productId":5,"quantity":1}],"paymentMethod":"CARD"}' -w '\n%{http_code}')
-  echo "  ${dim}Response:${rst}"
-  head -n -1 <<<"$body" | python3 -m json.tool 2>/dev/null | sed 's/^/    /'
-  echo "  HTTP status: ${bold}$(tail -1 <<<"$body")${rst}"
-
-  step "কতবার retry হলো?"
-  settle
-  local n; n=$(docker compose logs sales --since 2m 2>/dev/null | grep -F "$rid" | grep -c 'RETRY .* attempt')
-  echo "  Retries against inventory: ${bold}${red}${n}${rst}"
+  code=$(tail -1 <<<"$body")
+  local ok_id; ok_id=$(head -n -1 <<<"$body" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])" 2>/dev/null)
+  echo "  HTTP status: ${bold}${code}${rst}   order id: ${bold}${ok_id}${rst}"
   echo
-  echo "  ${bold}Zero, on purpose.${rst} POST /api/stock/reserve decrements stock and is"
-  echo "  not idempotent. A read timeout means the ${bold}response${rst} was lost -- not the"
-  echo "  request. The reservation may already be committed on the other side, so a"
-  echo "  retry would silently reserve the units twice and the discrepancy would"
-  echo "  surface days later in a stock count with nothing to trace it to."
-  echo
-  echo "  catalog, by contrast, IS retried: GET /api/products/{id} is idempotent."
-  note "  Retrying safely here would need inventory to accept an idempotency key."
+  echo "  ${bold}202 Accepted, status PENDING.${rst} The order is durable and its saga is"
+  echo "  guaranteed to run -- but stock is unchecked and no card has been charged."
+  echo "  201 would claim it succeeded at the moment nobody knows whether it will."
+  settle 3
+  echo "  After ~2s: status = ${bold}${grn}$(order_status "$ok_id")${rst}"
 
-  step "শেষ পর্যন্ত user কী response পেল?"
-  echo "  ${bold}503 Service Unavailable${rst} with a Retry-After header -- and NO fallback."
-  echo "  There is no honest degraded version of an order: confirming one without"
-  echo "  reserving stock or taking payment would be worse than failing outright."
+  step "2. Now an order that will be DECLINED"
+  note "Total must end in .13 on products that are in stock: 37 x 59.99 + 1 x 35.50 = 2255.13"
+  local bad_id
+  bad_id=$(curl -s -X POST "$SALES/api/orders" -H 'Content-Type: application/json' \
+    -d '{"customerId":2,"items":[{"productId":8,"quantity":37},{"productId":6,"quantity":1}],"paymentMethod":"CARD"}' \
+    | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])" 2>/dev/null)
+  echo "  order id: ${bold}${bad_id}${rst}  (accepted, PENDING)"
+  settle 4
+  echo "  Final status: ${bold}${ylw}$(order_status "$bad_id")${rst}"
+  echo
+  echo "  ${bold}CANCELLED${rst}, not PAYMENT_FAILED. The difference matters: PAYMENT_FAILED"
+  echo "  means the charge was declined, CANCELLED means the reserved stock has been"
+  echo "  confirmed back on the shelf. This enum constant was previously never set."
+
+  step "3. Who gave the stock back? -- the compensation"
+  docker compose exec -T postgres psql -U postgres -d microservices -t -A -F' | ' \
+    -c "SELECT order_id, movement_type, quantity FROM inventory.stock_movements
+        WHERE order_id=${bad_id} ORDER BY id;" 2>/dev/null | sed 's/^/    /'
+  echo
+  echo "  The ${bold}RESERVE${rst} rows are still there. Compensation is a new business fact,"
+  echo "  not an undo -- the history must show the units were held and then returned."
+
+  step "4. The whole saga, across four services, from one grep"
   settle
-  narrate sales "$rid"
-  clear_fault
+  docker compose logs sales inventory1 inventory2 payment --since 3m 2>/dev/null \
+    | grep -E "order=${bad_id}\b" \
+    | grep -E '\[saga\]|\[outbox\]|\[kafka\]|\[stock\]|\[payment\]' \
+    | sed -E 's/^([a-z0-9]+)[ ]+\|.*(\[(saga|outbox|kafka|stock|payment)\].*)$/  \1  \2/' \
+    | cut -c1-140 | head -24
+
+  step "5. Why sales has no breaker for inventory or payment any more"
+  echo "  sales breakers: ${bold}$(curl -s "$SALES/actuator/circuitbreakers" | python3 -c "
+import json,sys
+for k,v in json.load(sys.stdin)['circuitBreakers'].items(): print(f'{k}={v[\"state\"]}', end='  ')" 2>/dev/null)${rst}"
+  echo
+  echo "  Only ${bold}catalog${rst} -- the one call that is still synchronous."
+  echo
+  echo "  Circuit breakers, bulkheads and rate limiters all answer one question:"
+  echo "  ${bold}what does a caller do when the callee is unreachable right now?${rst}"
+  echo "  Publishing to a durable log never raises it. The broker holds the event"
+  echo "  until the consumer is healthy, so a service that is down is a consumer"
+  echo "  with ${bold}lag${rst} -- not a failed call. Prove it with:"
+  echo
+  echo "     docker compose stop payment"
+  echo "     curl -X POST $SALES/api/orders ...     # 202, parks at STOCK_RESERVED"
+  echo "     docker compose start payment           # completes on its own"
+  echo
+  note "  This is Lab 06. The patterns were deleted, not disabled."
 }
 
 # ---------------------------------------------------------------------------
